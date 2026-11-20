@@ -1,0 +1,765 @@
+/* Layout: top bar, chat-tab columns on the left, infinite loom canvas filling the rest.
+   Palette: lilac / palm leaf / dusty olive / emerald depths / dark slate grey, plus darker slate for depth.
+   No borders; open-thread nodes fade their colour in from two corners. */
+
+@font-face {
+  font-family: 'Computer Modern Serif';
+  src: url('./fonts/cmunrm.woff') format('woff');
+  font-display: swap;
+}
+@font-face {
+  font-family: 'Diamond Grotesk';
+  src: url('./fonts/DiamondGrotesk-VF.ttf') format('truetype');
+  font-weight: 100 900;
+  font-display: swap;
+}
+
+:root {
+  --lilac: #515d52;
+  --palm: #7c8159;
+  --olive: #a4b07d;
+  --emerald: #365436;
+  --slate: #21362b;
+
+  /* the ground: darker than the palette's slate */
+  --abyss: #171c19; /* header */
+  --canvas: #1a1e1a;
+  --panel: #1a1e1a; /* chat panel */
+  --panel-hi: #141514;
+  /* things sitting on the ground: lighter than slate */
+  --surface: #070908; /* menus, chat box, controls */
+  --surface-hi: #2b352f;
+  --bubble-model: #212b25;
+  --bubble-user: #253027;
+  --node: #111212;
+  --tint-base: color-mix(in srgb, var(--node) 62%, #000); /* darker base for the chat-colour tints */
+
+  --dots: #809380; /* canvas dot grid */
+  --connector: #7d827e; /* connector letters not on an open chat */
+  --ink: #eceaef;
+  --ink-soft: rgba(236, 234, 239, 0.62);
+  --ink-faint: rgba(236, 234, 239, 0.13);
+  --edge: rgba(166, 171, 117, 0.75);
+  --loom: rgba(185, 160, 188, 0.32);
+  --loom-line: rgba(185, 160, 188, 0.85);
+  --danger: #e5a198;
+
+  --font-ui: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-head: 'Helvetica Neue', Helvetica, Arial, sans-serif;
+  --font-user: 'Diamond Grotesk', 'Helvetica Neue', Arial, sans-serif;
+  --font-model: 'Computer Modern Serif', Georgia, serif;
+
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  background: var(--panel);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
+}
+button { font: inherit; color: inherit; }
+/* the chat box and the row of tab columns scroll without a visible bar (the message lists keep theirs) */
+.composer textarea, .sidebar { scrollbar-width: none; }
+.composer textarea::-webkit-scrollbar, .sidebar::-webkit-scrollbar { display: none; width: 0; height: 0; }
+:focus-visible { outline: 2px solid var(--lilac); outline-offset: 2px; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+/* ---------- outlines ---------- */
+
+/* small solid swatches (tab pips): a plain coloured outline, no glow */
+.glow { border: 2px solid var(--c, var(--olive)); }
+
+/* the node a chat is on, and that chat's messages, share one background tinged with the chat's colour */
+.lnode[data-selected] {
+  background: color-mix(in srgb, var(--sel) 13%, var(--tint-base)); /* fallback for older browsers */
+  /* the chat colour's own dark shade: same hue, the same low lightness for every colour */
+  background: var(--sel-dark);
+}
+.col .bubble.model,
+.col .bubble.user {
+  background: color-mix(in srgb, var(--c) 13%, var(--tint-base));
+  background: var(--c-dark);
+}
+/* messages in the open chats you're not in */
+.col:not(.active) .bubble.model,
+.col:not(.active) .bubble.user { background: var(--c-idle, var(--c-dark)); }
+
+/* No borders. The node a chat is currently on gets a solid outline in that chat's colour on
+   all four corners: each side coloured for a third from each end, dark in the middle third. */
+.lnode[data-selected]::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border: 3.5px solid var(--sel);
+  border-color: oklch(from var(--sel) max(l, 0.74) c h); /* brightened outline */
+  border-radius: inherit;
+  pointer-events: none;
+  /* keep only where x and y are both in an outer third */
+  -webkit-mask-image: linear-gradient(to right, #000 33.3%, transparent 33.3% 66.7%, #000 66.7%),
+    linear-gradient(to bottom, #000 33.3%, transparent 33.3% 66.7%, #000 66.7%);
+  -webkit-mask-composite: source-in;
+  mask-image: linear-gradient(to right, #000 33.3%, transparent 33.3% 66.7%, #000 66.7%),
+    linear-gradient(to bottom, #000 33.3%, transparent 33.3% 66.7%, #000 66.7%);
+  mask-composite: intersect;
+}
+
+/* ---------- app shell ---------- */
+.app { display: flex; flex-direction: column; height: 100%; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 0 max(16px, env(safe-area-inset-left, 0px));
+  background: var(--abyss);
+  border-bottom: 1px solid var(--ink-faint);
+  position: relative;
+  z-index: 5;
+}
+.wordmark { margin: 0; line-height: 0; color: var(--ink); }
+/* one SVG drawn from the title font: every letter shares a baseline and scale */
+.wm { display: block; height: 31px; width: auto; overflow: visible; }
+.wm-ink { fill: currentColor; }
+.wm-slash { fill: var(--ink-soft); }
+.wm-eye { fill: var(--abyss); stroke: #ffffff; stroke-width: 46; }
+.wm-pupil { fill: var(--lilac); animation: look 7s ease-in-out infinite; transform-box: fill-box; }
+.topbar-actions { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+
+.icon-btn {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.icon-btn:hover:not(:disabled) { background: var(--ink-faint); color: var(--ink); }
+.icon-btn:disabled { opacity: 0.45; cursor: default; }
+.icon-btn.big { width: 34px; height: 34px; color: var(--ink); }
+
+.text-btn {
+  border: 1px solid var(--lilac);
+  background: transparent;
+  color: var(--ink);
+  border-radius: 999px;
+  padding: 5px 14px;
+  font: 13px var(--font-head);
+  cursor: pointer;
+}
+.text-btn:hover { background: var(--lilac); color: var(--abyss); }
+.text-btn.quiet { border-color: transparent; color: var(--ink-soft); }
+.text-btn.quiet:hover { color: var(--ink); background: var(--ink-faint); }
+
+.workspace { display: flex; flex: 1; min-height: 0; }
+
+/* floating corner controls on the canvas */
+.chrome { position: absolute; top: 12px; z-index: 6; display: flex; align-items: center; gap: 10px; }
+.chrome-left { left: 14px; }
+.chrome-right { right: 14px; gap: 2px; }
+
+/* ---------- sidebar / chat tabs ---------- */
+.sidebar {
+  display: flex;
+  flex: none;
+  max-width: 78vw;
+  overflow-x: auto;
+  overflow-y: hidden;
+  background: var(--panel);
+  border-right: 1px solid var(--ink-faint);
+}
+.sidebar-empty { width: 280px; padding: 28px 22px; color: var(--ink-soft); line-height: 1.5; }
+.sidebar-empty p:first-child { font: 19px var(--font-head); color: var(--ink); margin-top: 0; }
+
+.rail {
+  flex: none;
+  width: 46px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding-top: 16px;
+  background: var(--panel);
+  border-right: 1px solid var(--ink-faint);
+}
+/* a collapsed tab: its title written down it like a book spine, cut off with … past a set height */
+.rail-window { display: flex; flex-direction: column; align-items: center; gap: 8px; }
+.rail-sep { width: 18px; height: 1px; margin: 2px 0 4px; background: var(--ink-faint); }
+.rail-pip.background { opacity: 0.6; }
+.rail-pip {
+  writing-mode: vertical-rl;
+  max-height: 130px;
+  padding: 8px 4px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  border-radius: 6px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 12px/1 var(--font-ui);
+  cursor: pointer;
+}
+
+.col {
+  --c: var(--olive);
+  position: relative;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  border-right: 1px solid var(--ink-faint);
+}
+.col:last-child { border-right: 0; }
+
+.col-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  height: 44px;
+  padding: 0 8px 0 10px;
+  /* the line under the tab row, drawn inside the header so the current tab can cover it */
+  box-shadow: inset 0 -1px 0 var(--ink-faint);
+  flex: none;
+}
+.folder-tab {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  height: 32px;
+  padding: 0 8px 0 11px;
+  border: 1px solid var(--ink-faint);
+  border-bottom-color: transparent;
+  border-radius: 11px 14px 0 0;
+  background: var(--panel);
+}
+/* tabs you're not on sit on the header line (their own bottom edge draws it over their fill) */
+.folder-tab:not(.active) { border-bottom-color: var(--ink-faint); }
+.folder-tab.active { background: var(--panel-hi); border-color: color-mix(in srgb, var(--c) 60%, transparent); border-color: oklch(from var(--c) max(l, 0.74) c h); border-bottom-color: var(--panel-hi); }
+.folder-tab .pip { flex: none; width: 11px; height: 11px; border-radius: 4px; background: var(--surface); }
+.tab-name {
+  cursor: pointer;
+  font: 14px var(--font-head);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tab-name-input {
+  width: 90px;
+  font: 14px var(--font-head);
+  color: var(--ink);
+  border: 0;
+  border-bottom: 1px solid var(--lilac);
+  background: transparent;
+  outline: none;
+}
+.col-head-actions { display: flex; gap: 2px; padding-bottom: 6px; flex: none; }
+/* a window's tab row: tabs side by side, scrolling sideways when there are many */
+.tab-strip { display: flex; align-items: flex-end; gap: 3px; min-width: 0; flex: 1; height: 100%; overflow-x: auto; scrollbar-width: none; }
+.tab-strip::-webkit-scrollbar { display: none; }
+.tab-strip .folder-tab { flex: 0 1 auto; max-width: 170px; cursor: pointer; }
+.tab-strip .folder-tab:not(.active) .tab-name { color: var(--ink-soft); }
+.folder-tab .tab-close { flex: none; width: 20px; height: 20px; }
+.folder-tab.hover-close:not(.active) .tab-close { visibility: hidden; }
+.folder-tab.hover-close:hover .tab-close { visibility: visible; }
+.folder-tab.dragging { opacity: 0.35; }
+.tab-drop { flex: none; align-self: stretch; width: 2px; margin: 8px 0 0; border-radius: 1px; background: oklch(from var(--c, var(--ink)) max(l, 0.8) c h); }
+.col.drop-target .msgs { box-shadow: inset 0 0 0 2px oklch(from var(--c) max(l, 0.74) c h); }
+.tab-ghost {
+  position: fixed;
+  z-index: 95;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 5px 10px;
+  border: 1px solid #2c312e;
+  border-radius: 8px 10px 0 0;
+  background: #0b0d0c;
+  color: var(--ink);
+  font: 14px var(--font-head);
+}
+.tab-ghost-hint { font: 11px var(--font-ui); color: var(--ink-soft); }
+.tab-ghost-hint.blocked { color: var(--danger); }
+
+.col.folded { width: 40px; }
+.folded-btn {
+  height: 100%;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding-top: 14px;
+  cursor: pointer;
+}
+.folded-btn:hover { background: var(--ink-faint); }
+.folded-btn .pip { width: 12px; height: 12px; border-radius: 4px; background: var(--surface); }
+.folded-name { writing-mode: vertical-rl; font: 13px var(--font-head); }
+
+.col-resizer {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  width: 8px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+}
+/* the last window's handle stays inside it, so the sidebar never overflows (and can't be scrolled sideways a few px) */
+.col:last-child .col-resizer { right: 0; }
+.col-resizer:hover, .col-resizer[data-dragging] { background: color-mix(in srgb, var(--c) 35%, transparent); }
+
+.msgs {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 16px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  background: var(--panel-hi);
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--olive) 30%, transparent) transparent; /* dim until the mouse is over it */
+}
+.col:not(.active) .msgs { background: var(--panel); }
+/* the current tab is always the same colour as the chat under it */
+.col:not(.active) .folder-tab.active { background: var(--panel); border-bottom-color: var(--panel); }
+.msgs-empty { color: var(--ink-soft); line-height: 1.55; margin: 8px 4px; font-size: 13.5px; }
+
+.bubble {
+  position: relative;
+  max-width: calc(100% - 38px);
+  padding: 12px 15px 13px;
+  border-radius: 10px;
+  overflow-wrap: anywhere;
+}
+.bubble p { margin: 0; white-space: pre-wrap; }
+.bubble.model {
+  align-self: flex-start;
+  border-radius: 10px 10px 10px 4px;
+  background: var(--bubble-model);
+  font: 16.5px/1.5 var(--font-model);
+}
+.bubble.user {
+  align-self: flex-end;
+  border-radius: 10px 10px 4px 10px;
+  background: var(--bubble-user);
+  font: 15.5px/1.5 var(--font-user);
+}
+.tag {
+  position: absolute;
+  padding: 1px 3px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  font: 13px var(--font-ui);
+  color: var(--ink-soft);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.tag:hover { color: var(--ink); background: var(--loom); }
+.tag.loomed { color: var(--ink); background: var(--loom); }
+.bubble.model .tag { right: -44px; }
+.bubble.user .tag { left: -36px; }
+.tag.top { top: 2px; }
+.tag.bottom { bottom: 2px; }
+
+.tok { border-radius: 4px; cursor: pointer; }
+.tok:hover { background: var(--loom); box-shadow: 0 0 0 2px var(--loom); }
+.tok.loomed { background: var(--loom); box-shadow: 0 0 0 2px var(--loom); }
+/* branches from the end of the conversation: a Reddit-style thread line into a sideways-scrolling row */
+.fork-tree {
+  --line: rgba(236, 234, 239, 0.45);
+  display: flex;
+  gap: 8px;
+  margin-top: -22px; /* cancel the message gap: the stem starts right at the last message */
+  padding: 0 2px 8px 2px;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--olive) 30%, transparent) transparent; /* dim until the mouse is over it */
+}
+.fork-item { position: relative; flex: none; width: 82px; padding-top: 20px; } /* narrow; the row scrolls only when they don't all fit */
+/* the bar along the top, joining every branch */
+.fork-item::before {
+  content: '';
+  position: absolute;
+  top: 10px;
+  left: -4px; /* half the 8px gap each side: neighbouring segments meet without overlapping */
+  right: -4px;
+  border-top: 2px solid var(--line);
+}
+.fork-item:first-child::before { left: 12px; border-top-left-radius: 0; }
+.fork-item:last-child::before { right: calc(100% - 13px); }
+.fork-item:only-child::before { display: none; }
+/* the drop into each box; the first one carries on up to the message (the stem) */
+.fork-item::after {
+  content: '';
+  position: absolute;
+  left: 12px;
+  top: 10px;
+  height: 10px;
+  border-left: 2px solid var(--line);
+}
+.fork-item:first-child::after { top: 0; height: 20px; }
+.fork-box {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  padding: 8px 9px 9px;
+  border: 0;
+  border-radius: 10px;
+  background: var(--node); /* the colour of a node that isn't selected */
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+}
+.fork-box.model { font: 13.5px/1.35 var(--font-model); }
+.fork-box.user { font: 13px/1.35 var(--font-user); }
+.fork-box.empty { font: italic 13px var(--font-ui); }
+.fork-box:hover { background: color-mix(in srgb, var(--node) 45%, #000); } /* hover darkens */
+.fork-word { white-space: nowrap; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.fork-word.muted { color: var(--ink-soft); }
+.caret {
+  display: inline-block;
+  width: 7px;
+  height: 1.05em;
+  margin-left: 2px;
+  vertical-align: -0.15em;
+  border-radius: 2px;
+  background: var(--c);
+  animation: blink 0.9s steps(2) infinite;
+}
+
+.tok-tip, .node-tip {
+  position: fixed;
+  z-index: 60;
+  pointer-events: none;
+  background: #0b0d0c; /* almost black */
+  color: var(--ink);
+  border: 1px solid #2c312e; /* a slightly lighter outline */
+  border-radius: 7px;
+  padding: 5px 9px;
+  font: 12.5px var(--font-ui);
+  white-space: nowrap;
+}
+.tok-tip { display: grid; gap: 1px; }
+.tok-tip-sub { font-size: 11px; color: var(--ink-soft); }
+
+.composer { padding: 10px 12px 14px; flex: none; border-top: 1px solid var(--ink-faint); background: inherit; }
+.composer-hint { margin: 0 6px 8px; font-size: 12px; color: var(--ink-soft); }
+.composer-row { display: flex; align-items: center; gap: 8px; }
+.composer-row .composer-box { flex: 1; min-width: 0; }
+.composer-plus {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+/* the + takes the chat box outline's colour */
+.composer-plus { color: oklch(from var(--c) max(l, 0.74) c h); }
+.composer-plus svg { width: 19px; height: 19px; }
+.composer-plus:hover, .composer-plus[aria-expanded='true'] { background: var(--surface-hi); }
+/* an open token: the message has started (its tag shows) but nothing is written in it yet */
+.bubble.open-token { min-width: 46px; min-height: 2.2em; padding: 6px 12px; opacity: 0.7; }
+.composer-box {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  padding: 6px 6px 6px 16px;
+  border: 1px solid var(--c);
+  border-color: oklch(from var(--c) max(l, 0.74) c h);
+  border-radius: 22px;
+  background: var(--surface);
+}
+.composer-box:focus-within { border-color: oklch(from var(--c) max(l, 0.84) c h); }
+.composer textarea {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  background: transparent;
+  color: var(--ink);
+  font: 15.5px/1.4 var(--font-user);
+  padding: 5px 0;
+  max-height: 140px;
+  overflow-y: auto;
+}
+.composer textarea::placeholder { color: var(--ink-soft); font-family: var(--font-ui); font-size: 15px; }
+.send {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 0;
+  display: grid;
+  place-items: center;
+  background: var(--lilac);
+  color: var(--abyss);
+  cursor: pointer;
+}
+.send:disabled { background: var(--ink-faint); color: var(--ink-soft); cursor: default; }
+
+/* ---------- canvas ---------- */
+.canvas { position: relative; flex: 1; min-width: 0; background: var(--canvas); overflow: hidden; }
+.edge-letters { position: absolute; inset: 0; pointer-events: none; }
+.edge-letters canvas { display: block; }
+.canvas .react-flow { background: transparent; }
+.canvas-hint {
+  position: absolute;
+  bottom: 12px;
+  left: 64px;
+  right: 240px;
+  margin: 0;
+  width: fit-content;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--canvas); /* so connector letters passing under it can't scramble it */
+  max-width: calc(100% - 64px - 190px);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: rgba(236, 234, 239, 0.32);
+  font-size: 11.5px;
+  line-height: 1.5;
+  pointer-events: none;
+  z-index: 4;
+}
+.canvas-hint kbd { font: inherit; color: rgba(236, 234, 239, 0.5); }
+
+.react-flow__handle { opacity: 0; pointer-events: none; width: 2px; height: 2px; min-width: 0; min-height: 0; border: 0; }
+.react-flow__node { cursor: grab; pointer-events: all !important; }
+
+.lnode {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 12px 15px 11px 15px;
+  border-radius: 10px;
+  background: var(--node);
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.38;
+  user-select: none;
+  touch-action: none;
+}
+.lnode p { margin: 0; overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+.lnode-head { padding-right: 46px; }
+.lnode-tail { text-align: right; color: var(--ink-soft); }
+.lnode .user { font: 14px/1.3 var(--font-user); }
+.lnode .model { font: 15px/1.3 var(--font-model); }
+.lnode-empty { color: var(--ink-soft); font: italic 12px var(--font-ui); }
+.lnode-meta {
+  position: absolute;
+  top: 9px;
+  right: 12px;
+  font: 11.5px var(--font-ui);
+  color: var(--ink-soft);
+}
+.lnode-hidden {
+  position: absolute;
+  left: 50%;
+  bottom: -11px;
+  transform: translateX(-50%);
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--lilac);
+  color: var(--abyss);
+  font: 10.5px var(--font-ui);
+  white-space: nowrap;
+}
+
+.root-node { position: relative; width: 100%; height: 100%; touch-action: none; }
+.root-node .lnode-hidden { bottom: -6px; }
+.robot { position: relative; width: 100%; height: 100%; }
+.robot > span {
+  position: absolute;
+  inset: 0;
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center bottom;
+  -webkit-mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center bottom;
+}
+.robot-fill { background: var(--node); }
+.robot-lines { background: var(--olive); }
+.root-node:hover .robot-lines { background: var(--lilac); }
+
+.loom-dots, .react-flow__edge-path.loom-dots {
+  fill: none;
+  stroke: var(--edge);
+  stroke-width: 7;
+  stroke-dasharray: 0 15;
+  stroke-linecap: round;
+}
+.fork-ghost { position: absolute; overflow: visible; pointer-events: none; }
+.loom-dots.ghost { stroke: var(--lilac); }
+.ghost-box { fill: rgba(185, 160, 188, 0.08); stroke: var(--lilac); stroke-width: 2.5; stroke-dasharray: 8 7; }
+.ghost-label { fill: var(--ink); font: 15px var(--font-head); }
+
+/* level of detail when zoomed far out: flat colour blocks, no text, no grain */
+.canvas[data-lod='low'] .lnode { background: var(--olive); }
+.canvas[data-lod='low'] .lnode[data-threaded] { background: var(--c); }
+.canvas[data-lod='low'] .lnode > *,
+.canvas[data-lod='low'] .lnode::before,
+.canvas[data-lod='low'] .lnode::after { visibility: hidden; }
+
+.react-flow__controls {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--ink-faint);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.react-flow__controls-button {
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  border-bottom: 1px solid var(--ink-faint);
+  background: var(--surface);
+  color: var(--ink);
+  cursor: pointer;
+  padding: 0;
+}
+.react-flow__controls-button:last-child { border-bottom: 0; }
+.react-flow__controls-button:hover { background: var(--lilac); color: var(--abyss); }
+.react-flow__controls-button svg { width: 13px; height: 13px; max-width: 13px; fill: currentColor; }
+.react-flow__minimap { border: 1px solid var(--ink-faint); border-radius: 10px; overflow: hidden; }
+
+/* ---------- node menu ---------- */
+.node-menu {
+  position: fixed;
+  z-index: 70;
+  width: 200px;
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--ink-faint);
+  border-radius: 4px;
+  box-shadow: 4px 4px 0 rgba(0, 0, 0, 0.35);
+}
+.node-menu button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 9px 11px;
+  border: 0;
+  border-bottom: 1px solid var(--ink-faint);
+  background: transparent;
+  font: 12.5px var(--font-ui);
+  text-align: left;
+  cursor: pointer;
+}
+.node-menu > :last-child, .node-menu > :last-child > button { border-bottom: 0; }
+.node-menu button:hover:not(:disabled), .node-menu button:focus-visible { background: var(--surface-hi); outline: none; }
+.node-menu button:disabled { color: rgba(236, 234, 239, 0.32); cursor: default; }
+.node-menu button.danger { color: var(--danger); }
+.node-menu button.danger:disabled { color: rgba(229, 161, 152, 0.32); }
+.has-sub { position: relative; }
+.chev { font-size: 17px; line-height: 0.6; }
+.node-menu.sub { z-index: 71; } /* placed by Flyout so it always stays on screen */
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 22px;
+  transform: translateX(-50%);
+  z-index: 80;
+  padding: 9px 16px;
+  border-radius: 999px;
+  background: var(--lilac);
+  color: var(--abyss);
+  font: 13px var(--font-head);
+}
+
+@keyframes blink { 50% { opacity: 0; } }
+@keyframes blink-eyes { 0%, 92%, 100% { transform: scaleY(1); } 95% { transform: scaleY(0.1); } }
+@keyframes look { 0%, 40%, 100% { transform: translate(0, 0); } 50%, 70% { transform: translate(-2.4px, -0.6px); } }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+/* ---------- phone layout: one view at a time, swapped with the sidebar toggle ---------- */
+.app.mobile .m-chat { flex: 1; min-width: 0; display: flex; flex-direction: column; background: var(--panel); }
+.app.mobile .canvas-hint, .app.mobile .react-flow__minimap { display: none; }
+.m-empty { align-items: center; justify-content: center; padding: 32px; color: var(--ink-soft); text-align: center; line-height: 1.5; }
+/* phone chat header: panel icon and close on the left, then the folder tabs */
+/* the sidebar toggle sits at exactly the same spot in the chat and the tree (10px, 6px) */
+.app.mobile { --toggle-x: 10px; --toggle-y: 6px; }
+.m-head { position: relative; justify-content: flex-start; gap: 6px; padding-left: calc(var(--toggle-x) + 34px + 8px); }
+.m-head-actions { position: absolute; left: var(--toggle-x); top: var(--toggle-y); display: flex; }
+.app.mobile .chrome { top: var(--toggle-y); }
+.app.mobile .chrome-left { left: var(--toggle-x); }
+.m-tabrow { display: flex; align-items: flex-end; gap: 4px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.m-tabrow::-webkit-scrollbar { display: none; }
+.m-tabrow .folder-tab { flex: none; max-width: 200px; cursor: pointer; }
+.m-tabrow .folder-tab:not(.active) { opacity: 0.75; }
+.m-tabrow .folder-tab.active { padding-right: 4px; gap: 4px; }
+.app.mobile .bubble { max-width: calc(100% - 44px); }
+.app.mobile .composer { padding-bottom: max(14px, env(safe-area-inset-bottom, 0px)); }
+
+/* ---------- canvas tools: hand (pan) and arrow (select) ---------- */
+.react-flow__panel.tool-box {
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 150px; /* sits just above the zoom controls */
+  border: 1px solid var(--ink-faint);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--surface);
+}
+.tool-box .react-flow__controls-button.on { background: var(--surface-hi); color: var(--ink); }
+.tool-box .react-flow__controls-button svg { width: 16px; height: 16px; max-width: 16px; fill: none; }
+.canvas[data-tool='hand'] .react-flow__pane { cursor: grab; }
+.canvas[data-tool='hand'] .react-flow__pane.dragging { cursor: grabbing; }
+/* with the hand, nodes don't take the pointer: every drag pans */
+.canvas[data-tool='hand'] .react-flow__node { pointer-events: none !important; }
+.canvas[data-tool='select'] .react-flow__pane { cursor: default; }
+.lnode[data-picked] { outline: 1.5px solid var(--ink); outline-offset: 3px; }
+/* hovering a node with the arrow: the same outline, fainter and dotted */
+.canvas[data-tool='select'] .lnode:not([data-picked]):hover { outline: 1.5px dotted rgba(236, 234, 239, 0.45); outline-offset: 3px; }
+/* the same outline when its branch box is hovered in the chat */
+.lnode[data-linked]:not([data-picked]) { outline: 1.5px dotted rgba(236, 234, 239, 0.45); outline-offset: 3px; }
+.marquee {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  border: 1px solid var(--ink-soft);
+  background: rgba(236, 234, 239, 0.06);
+}
+.menu-title { margin: 0; padding: 8px 11px 6px; font: 11px var(--font-ui); color: var(--ink-soft); border-bottom: 1px solid var(--ink-faint); }
+
+/* scrollbars brighten only while the mouse is over the area they scroll */
+.msgs:hover, .fork-tree:hover { scrollbar-color: var(--olive) transparent; }

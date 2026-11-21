@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { MAX_WINDOWS, exportMarkdown, hasHiddenBelow, useLoom, useUi } from '../store';
 import { useIsMobile } from '../useIsMobile';
-import { TOOLTIP_GAP, useNearCursor } from '../floating';
+import { useNearCursor } from '../floating';
 import { Flyout } from '../Flyout';
 
 export function NodeTooltip() {
@@ -10,9 +10,12 @@ export function NodeTooltip() {
   return <NodeTip x={hover.x} y={hover.y} />;
 }
 
+/** the node hint sits just off the cursor's tip */
+const NODE_TIP_GAP = { x: 4, y: 10 };
+
 function NodeTip({ x, y }: { x: number; y: number }) {
   const ref = useRef<HTMLDivElement>(null);
-  const { style } = useNearCursor(ref, x, y, TOOLTIP_GAP);
+  const { style } = useNearCursor(ref, x, y, NODE_TIP_GAP);
   return (
     <div className="node-tip" style={style} ref={ref} role="tooltip">
       double click to open, shift + drag to fork

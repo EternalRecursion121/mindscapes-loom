@@ -89,38 +89,12 @@ button { font: inherit; color: inherit; }
 .col:not(.active) .bubble.model,
 .col:not(.active) .bubble.user { background: var(--c-idle, var(--c-dark)); }
 
-/* No borders. The node a chat is currently on gets a solid outline in that chat's colour on
-   all four corners: each side coloured for a third from each end, dark in the middle third. */
-.lnode[data-selected]::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border: 3.5px solid var(--sel);
-  border-color: oklch(from var(--sel) max(l, 0.74) c h); /* brightened outline */
-  border-radius: inherit;
-  pointer-events: none;
-  /* keep only where x and y are both in an outer third */
-  -webkit-mask-image: linear-gradient(to right, #000 33.3%, transparent 33.3% 66.7%, #000 66.7%),
-    linear-gradient(to bottom, #000 33.3%, transparent 33.3% 66.7%, #000 66.7%);
-  -webkit-mask-composite: source-in;
-  mask-image: linear-gradient(to right, #000 33.3%, transparent 33.3% 66.7%, #000 66.7%),
-    linear-gradient(to bottom, #000 33.3%, transparent 33.3% 66.7%, #000 66.7%);
-  mask-composite: intersect;
-}
-/* the node a tab that's open but not showing is on: no fill, just its bottom-left corner outlined */
-.lnode[data-parked]::before {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border: 3.5px solid var(--park);
-  border-color: oklch(from var(--park) max(l, 0.74) c h);
-  border-radius: inherit;
-  pointer-events: none;
-  -webkit-mask-image: linear-gradient(to right, #000 33.3%, transparent 33.3%), linear-gradient(to bottom, transparent 66.7%, #000 66.7%);
-  -webkit-mask-composite: source-in;
-  mask-image: linear-gradient(to right, #000 33.3%, transparent 33.3%), linear-gradient(to bottom, transparent 66.7%, #000 66.7%);
-  mask-composite: intersect;
-}
+/* corner outlines (drawn in nodes.tsx): the showing tab's node gets all four corners in its chat's
+   colour; a tab that's open but not showing gets shorter, fainter corners, and no fill */
+.lnode-corners { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.lnode-corners path { fill: none; stroke-width: 3.5; stroke-linecap: butt; }
+.lnode-corners.showing path { stroke: var(--sel); stroke: oklch(from var(--sel) max(l, 0.74) c h); }
+.lnode-corners.parked path { stroke: var(--park); stroke: oklch(from var(--park) max(l, 0.74) c h); opacity: 0.55; }
 
 /* ---------- app shell ---------- */
 .app { display: flex; flex-direction: column; height: 100%; }
@@ -173,11 +147,16 @@ button { font: inherit; color: inherit; }
 .text-btn.quiet { border-color: transparent; color: var(--ink-soft); }
 .text-btn.quiet:hover { color: var(--ink); background: var(--ink-faint); }
 
-.workspace { display: flex; flex: 1; min-height: 0; }
+.workspace { display: flex; flex: 1; min-height: 0; position: relative; }
+/* desktop: the canvas fills the whole workspace and the chat windows sit on top of its left side */
+.app:not(.mobile) .workspace > .canvas { position: absolute; inset: 0; }
+.side-layer { position: absolute; top: 0; bottom: 0; left: 0; z-index: 7; display: flex; max-width: 78vw; }
+/* the canvas's left-hand controls stay just right of the chat windows */
+.app:not(.mobile) .canvas .react-flow__panel.left { left: var(--side-w, 0px); }
 
 /* floating corner controls on the canvas */
 .chrome { position: absolute; top: 12px; z-index: 6; display: flex; align-items: center; gap: 10px; }
-.chrome-left { left: 14px; }
+.chrome-left { left: calc(var(--side-w, 0px) + 14px); }
 .chrome-right { right: 14px; gap: 2px; }
 
 /* ---------- sidebar / chat tabs ---------- */
@@ -396,13 +375,13 @@ button { font: inherit; color: inherit; }
   align-self: flex-start;
   border-radius: 10px 10px 10px 4px;
   background: var(--bubble-model);
-  font: 16.5px/1.5 var(--font-model);
+  font: 15.5px/1.5 var(--font-model);
 }
 .bubble.user {
   align-self: flex-end;
   border-radius: 10px 10px 4px 10px;
   background: var(--bubble-user);
-  font: 15.5px/1.5 var(--font-user);
+  font: 14.5px/1.5 var(--font-user);
 }
 .tag {
   position: absolute;
@@ -547,12 +526,12 @@ button { font: inherit; color: inherit; }
   resize: none;
   background: transparent;
   color: var(--ink);
-  font: 15.5px/1.4 var(--font-user);
+  font: 14.5px/1.4 var(--font-user);
   padding: 5px 0;
   max-height: 140px;
   overflow-y: auto;
 }
-.composer textarea::placeholder { color: var(--ink-soft); font-family: var(--font-ui); font-size: 15px; }
+.composer textarea::placeholder { color: var(--ink-soft); font-family: var(--font-ui); font-size: 14px; }
 .send {
   flex: none;
   width: 32px;
@@ -575,14 +554,14 @@ button { font: inherit; color: inherit; }
 .canvas-hint {
   position: absolute;
   bottom: 12px;
-  left: 64px;
+  left: calc(var(--side-w, 0px) + 64px);
   right: 240px;
   margin: 0;
   width: fit-content;
   padding: 2px 6px;
   border-radius: 4px;
   background: var(--canvas); /* so connector letters passing under it can't scramble it */
-  max-width: calc(100% - 64px - 190px);
+  max-width: calc(100% - var(--side-w, 0px) - 64px - 190px);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -792,9 +771,9 @@ button { font: inherit; color: inherit; }
 .canvas[data-tool='select'] .react-flow__pane { cursor: default; }
 .lnode[data-picked] { outline: 1.5px solid var(--ink); outline-offset: 3px; }
 /* hovering a node with the arrow: the same outline, fainter and dotted */
-.canvas[data-tool='select'] .lnode:not([data-picked]):hover { outline: 1.5px dotted rgba(236, 234, 239, 0.85); outline-offset: 3px; }
+.canvas[data-tool='select'] .lnode:not([data-picked]):hover { outline: 2.1px dotted rgba(236, 234, 239, 0.8); outline-offset: 3px; }
 /* the same outline when its branch box is hovered in the chat */
-.lnode[data-linked]:not([data-picked]) { outline: 1.5px dotted rgba(236, 234, 239, 0.85); outline-offset: 3px; }
+.lnode[data-linked]:not([data-picked]) { outline: 2.1px dotted rgba(236, 234, 239, 0.8); outline-offset: 3px; }
 .marquee {
   position: absolute;
   z-index: 5;

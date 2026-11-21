@@ -1,6 +1,6 @@
 import { memo, type CSSProperties } from 'react';
 import { Handle, Position, type Node, type NodeProps } from '@xyflow/react';
-import { colorOf, countHiddenChildren, useLoom, useUi, type Message } from '../store';
+import { NODE_H, NODE_W, colorOf, countHiddenChildren, useLoom, useUi, type Message } from '../store';
 import { useNodeGestures } from './gestures';
 import robotLines from '../assets/robot-lines.png';
 import robotFill from '../assets/robot-fill.png';
@@ -22,6 +22,35 @@ function preview(messages: Message[], n = 7) {
   const lw = words(last.text);
   const tail = (lw.length ? lw : all).slice(-(n - 2)).join(' ');
   return { head: all.slice(0, n).join(' '), headRole: first.role, tail, tailRole: last.role };
+}
+
+/**
+ * Corner outlines drawn as just the corner pieces (an arc plus a third of each side), so nothing
+ * is masked and no hidden edge can show through when the canvas moves. 'all' for the node a
+ * chat's showing tab is on; 'parked', shorter (18% of the top and bottom, 25% of the sides) and fainter, for a tab that's open but not showing.
+ */
+const STROKE = 3.5;
+const RADIUS = 10; // the node's own corner radius
+/** fx, fy: how far along the top/bottom and the left/right sides a corner piece runs */
+function cornerPaths(w: number, h: number, fx: number, fy: number) {
+  const i = STROKE / 2; // the stroke sits inside the node, like a border
+  const r = RADIUS - i;
+  const L = i, T = i, R = w - i, B = h - i;
+  const sx = w * fx, sy = h * fy;
+  return [
+    `M${L} ${sy}V${T + r}A${r} ${r} 0 0 1 ${L + r} ${T}H${sx}`,
+    `M${w - sx} ${T}H${R - r}A${r} ${r} 0 0 1 ${R} ${T + r}V${sy}`,
+    `M${R} ${h - sy}V${B - r}A${r} ${r} 0 0 1 ${R - r} ${B}H${w - sx}`,
+    `M${sx} ${B}H${L + r}A${r} ${r} 0 0 1 ${L} ${B - r}V${h - sy}`,
+  ].join('');
+}
+const CORNERS = { showing: cornerPaths(NODE_W, NODE_H, 1 / 3, 1 / 3), parked: cornerPaths(NODE_W, NODE_H, 0.18, 0.25) };
+function CornerOutline({ kind }: { kind: 'showing' | 'parked' }) {
+  return (
+    <svg className={`lnode-corners ${kind}`} viewBox={`0 0 ${NODE_W} ${NODE_H}`} aria-hidden="true">
+      <path d={CORNERS[kind]} />
+    </svg>
+  );
 }
 
 function HiddenBadge({ id }: { id: string }) {
@@ -60,6 +89,7 @@ export const LoomNodeView = memo(function LoomNodeView({ id, data }: NodeProps<L
       {...g}
     >
       <Handle type="target" position={Position.Top} isConnectable={false} />
+      {data.selected !== undefined ? <CornerOutline kind="showing" /> : data.parked !== undefined && <CornerOutline kind="parked" />}
       <span className="lnode-meta">
         {count === 0 ? '' : count === 1 ? '1 msg' : `${count} msgs`}
       </span>

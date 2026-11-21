@@ -259,6 +259,16 @@ export function divergingToken(nodes: Nodes, id: string): string {
 }
 
 /** The tab showing in each window, left to right (background tabs are not visible). */
+/** Width in px of the chat windows floating over the canvas's left side (the rail when folded). */
+export function sideWidth(s: Pick<LoomState, 'tabs' | 'windows' | 'sidebarFolded'>): number {
+  if (!s.tabs.length) return 0;
+  if (s.sidebarFolded) return 46;
+  return Math.min(
+    s.windows.reduce((a, w) => a + w.width, 0),
+    Math.round(window.innerWidth * 0.78),
+  );
+}
+
 export function visibleTabs(s: Pick<LoomState, 'tabs' | 'windows'>): Tab[] {
   const byId = new Map(s.tabs.map((t) => [t.id, t]));
   return s.windows.map((w) => byId.get(w.activeTabId)).filter((t): t is Tab => !!t);

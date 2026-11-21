@@ -13,7 +13,7 @@ import {
   useStore as useFlowStore,
   type Node,
 } from '@xyflow/react';
-import { NODE_H, NODE_W, ROOT_H, ROOT_W, resolvedColor, threadColorMap, useLoom, useUi, visibleTabs, type LoomState } from '../store';
+import { NODE_H, NODE_W, ROOT_H, ROOT_W, resolvedColor, sideWidth, threadColorMap, useLoom, useUi, visibleTabs, type LoomState } from '../store';
 import { LoomNodeView, RootNodeView, type LoomData } from './nodes';
 import { EdgeLetters } from './EdgeLetters';
 import { ChromeLeft, ChromeRight } from '../Chrome';
@@ -113,6 +113,8 @@ function useFastPinch(ref: React.RefObject<HTMLDivElement>) {
 }
 
 /** When the active chat moves to a node that is off screen, glide the canvas over to it. */
+const useIsMobileQuery = () => window.matchMedia('(max-width: 720px)').matches;
+
 function useFollowActiveNode(wrap: React.RefObject<HTMLDivElement>) {
   const rf = useReactFlow();
   const head = useLoom((s) => s.tabs.find((t) => t.id === s.activeTabId)?.headId);
@@ -123,10 +125,12 @@ function useFollowActiveNode(wrap: React.RefObject<HTMLDivElement>) {
     const { x, y, zoom } = rf.getViewport();
     const W = el.clientWidth;
     const H = el.clientHeight;
+    // the chat windows cover the canvas's left side: only the part right of them counts as on screen
+    const side = useIsMobileQuery() ? 0 : sideWidth(useLoom.getState());
     const left = (n.x - NODE_W / 2) * zoom + x;
     const top = n.y * zoom + y;
-    const onScreen = left > 0 && top > 0 && left + NODE_W * zoom < W && top + NODE_H * zoom < H;
-    if (!onScreen) rf.setCenter(n.x, n.y + NODE_H / 2, { zoom, duration: 350 });
+    const onScreen = left > side && top > 0 && left + NODE_W * zoom < W && top + NODE_H * zoom < H;
+    if (!onScreen) rf.setCenter(n.x - side / 2 / zoom, n.y + NODE_H / 2, { zoom, duration: 350 });
   }, [head, rf, wrap]);
 }
 

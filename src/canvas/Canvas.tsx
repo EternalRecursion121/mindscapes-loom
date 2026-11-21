@@ -32,6 +32,8 @@ function buildNodes(s: LoomState) {
   const shown = visibleTabs(s);
   for (const t of [...shown.filter((t) => t.id !== s.activeTabId), ...shown.filter((t) => t.id === s.activeTabId)])
     heads.set(t.headId, t.color);
+  const parked = new Map<string, number>();
+  for (const t of s.tabs) if (!shown.includes(t)) parked.set(t.headId, t.color);
   const nodes: Node<LoomData>[] = [];
   const stack = [s.rootId];
   while (stack.length) {
@@ -45,7 +47,12 @@ function buildNodes(s: LoomState) {
       position: { x: n.x, y: n.y },
       width: isRoot ? ROOT_W : NODE_W,
       height: isRoot ? ROOT_H : NODE_H,
-      data: { color: isRoot ? undefined : colorMap.get(id), selected: isRoot ? undefined : heads.get(id) },
+      data: {
+        color: isRoot ? undefined : colorMap.get(id),
+        selected: isRoot ? undefined : heads.get(id),
+        // on a tab that's open but not the one showing in its window
+        parked: isRoot || heads.has(id) ? undefined : parked.get(id),
+      },
     });
     for (const c of s.children[id] ?? []) if (!s.nodes[c]?.hidden) stack.push(c);
   }

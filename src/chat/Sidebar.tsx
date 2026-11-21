@@ -595,7 +595,7 @@ const CloseIcon = () => (
 
 /** A window with an × in it: closes the whole window (all its tabs). */
 const CloseWindowIcon = () => (
-  <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+  <svg viewBox="0 0 20 20" width="20" height="20" aria-hidden="true">
     <rect x="2.5" y="3.5" width="15" height="13" rx="2.5" fill="none" stroke="currentColor" strokeWidth="1.5" />
     <path d="M7.5 7.5l5 5M12.5 7.5l-5 5" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
   </svg>
@@ -640,15 +640,12 @@ function FolderTab({
   active,
   index,
   draggable,
-  showClose,
   onMenu,
 }: {
   tab: Tab;
   active: boolean;
   index: number;
   draggable: boolean;
-  /** 'always' on the current tab and on hover (desktop), 'active' only on the showing tab (phone) */
-  showClose: 'always' | 'active';
   onMenu: (tabId: string, x: number, y: number) => void;
 }) {
   const [editing, setEditing] = useState(false);
@@ -661,13 +658,14 @@ function FolderTab({
   const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (e.button !== 0 || editing || !draggable || e.pointerType !== 'mouse') return;
     if ((e.target as HTMLElement).closest('button')) return;
+    // the pointer is only captured once a drag starts, so a plain click still reaches the name (rename)
     press.current = { x: e.clientX, y: e.clientY, dragging: false };
-    e.currentTarget.setPointerCapture(e.pointerId);
   };
   const onPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     const p = press.current;
     if (!p) return;
     if (!p.dragging && Math.hypot(e.clientX - p.x, e.clientY - p.y) < DRAG_START_PX) return;
+    if (!p.dragging) e.currentTarget.setPointerCapture(e.pointerId);
     p.dragging = true;
     useUi.getState().set({ tabDrag: { tabId: tab.id, x: e.clientX, y: e.clientY, target: dropTarget(tab.id, e.clientX, e.clientY) } });
   };
@@ -692,13 +690,16 @@ function FolderTab({
 
   return (
     <div
-      className={`folder-tab${active ? ' active' : ''}${dragging ? ' dragging' : ''}${showClose === 'always' ? ' hover-close' : ''}`}
+      className={`folder-tab${active ? ' active' : ''}${dragging ? ' dragging' : ''}`}
       style={{ '--c': c.core, '--f': c.fringe } as CSSProperties}
       data-tab={tab.id}
       data-index={index}
       role="tab"
       aria-selected={active}
       onClick={() => !active && L.setActiveTab(tab.id)}
+      // hovering a tab outlines its node on the canvas, like hovering the node itself
+      onMouseEnter={() => useUi.getState().set({ linkHover: tab.headId })}
+      onMouseLeave={() => useUi.getState().linkHover === tab.headId && useUi.getState().set({ linkHover: null })}
       onAuxClick={(e) => {
         if (e.button === 1) {
           e.preventDefault();
@@ -748,7 +749,7 @@ function FolderTab({
           {label}
         </span>
       )}
-      {(active || showClose === 'always') && (
+      {(
         <button
           className="icon-btn tab-close"
           title="Close tab"
@@ -821,27 +822,169 @@ function TabMenu({ tabId, x, y, onClose }: { tabId: string; x: number; y: number
   );
 }
 
-/** A window's row of tabs, with a marker where a dragged tab would drop, and the close-window button. */
-function TabStrip({ win, tabs, onMenu }: { win: Win; tabs: Tab[]; onMenu: (tabId: string, x: number, y: number) => void }) {
+/** Three stacked cards: the "all tabs" group. */
+const StackIcon = () => (
+  <svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true">
+    <g fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" transform="skewY(-8) translate(0 3)">
+      <path d="M3 17V8.5A3 3 0 0 1 6 5.5h9" />
+      <path d="M6.5 19.5v-8a3 3 0 0 1 3-3h9" />
+      <rect x="10" y="11.5" width="12" height="10" rx="2.5" />
+    </g>
+  </svg>
+);
+
+/** Narrowest a tab may get before the row switches to "current tab + stack". */
+const TAB_MIN_W = 76;
+const TAB_GAP = 3;
+
+/** Every tab of a window in a scrollable list: pick one to bring it to the front, × to close it. */
+function TabListMenu({ tabs, activeId, x, y, onClose }: { tabs: Tab[]; activeId: string; x: number; y: number; onClose: () => void }) {
+  const ref = useRef<HTMLDivElement>(null);
+  const place = useNearCursor(ref, x, y);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
+    const onDown = (e: PointerEvent) => {
+      if (ref.current && !ref.current.contains(e.target as globalThis.Node)) onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    window.addEventListener('pointerdown', onDown, true);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      window.removeEventListener('pointerdown', onDown, true);
+    };
+  }, [onClose]);
+  return (
+    <div className="node-menu tab-list" style={place.style} ref={ref} role="menu" aria-label="Other tabs in this window">
+      {tabs.map((t) => (
+        <TabListRow key={t.id} tab={t} current={t.id === activeId} onPicked={onClose} />
+      ))}
+    </div>
+  );
+}
+function TabListRow({ tab, current, onPicked }: { tab: Tab; current: boolean; onPicked: () => void }) {
+  const label = useTabLabel(tab);
+  const L = useLoom.getState();
+  return (
+    <div
+      className={`tab-list-row${current ? ' current' : ''}`}
+      onMouseEnter={() => useUi.getState().set({ linkHover: tab.headId })}
+      onMouseLeave={() => useUi.getState().linkHover === tab.headId && useUi.getState().set({ linkHover: null })}
+    >
+      <button
+        role="menuitem"
+        className="tab-list-name"
+        onClick={() => {
+          L.setActiveTab(tab.id);
+          onPicked();
+        }}
+      >
+        <span className="tab-name">{label}</span>
+      </button>
+      <button className="icon-btn tab-close" title="Close tab" aria-label={`Close ${label}`} onClick={() => L.closeTab(tab.id)}>
+        <CloseIcon />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * A row of tabs. All tabs share one width, shrinking as more open. When they no longer fit, the
+ * row shows the current tab on the left and a stack tab on the right that lists them all.
+ */
+function TabRow({
+  tabs,
+  activeId,
+  stripId,
+  draggable,
+  onMenu,
+}: {
+  tabs: Tab[];
+  activeId: string;
+  /** the window id, for dragging tabs in (desktop) */
+  stripId?: string;
+  draggable: boolean;
+  onMenu: (tabId: string, x: number, y: number) => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+  const [width, setWidth] = useState(0);
+  const [list, setList] = useState<{ x: number; y: number } | null>(null);
+  const [tip, setTip] = useState<{ x: number; y: number } | null>(null);
+  const tipTimer = useRef<number>();
   const drag = useUi((s) => s.tabDrag);
-  const marker = drag && drag.target && typeof drag.target === 'object' && drag.target.windowId === win.id ? drag.target.index : -1;
-  let k = 0; // position among the tabs that aren't being dragged
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => setWidth(el.clientWidth));
+    ro.observe(el);
+    setWidth(el.clientWidth);
+    return () => ro.disconnect();
+  }, []);
+  const stacked = width > 0 && tabs.length > 1 && tabs.length * (TAB_MIN_W + TAB_GAP) > width;
+  // once the stack is gone (its tabs closed, or they fit again) its menu closes too
+  useEffect(() => {
+    if (!stacked) setList(null);
+  }, [stacked]);
+  const active = tabs.find((t) => t.id === activeId) ?? tabs[0];
+  const shown = stacked ? (active ? [active] : []) : tabs;
+  const marker = drag && stripId && drag.target && typeof drag.target === 'object' && drag.target.windowId === stripId ? drag.target.index : -1;
+  let k = 0;
   const items: React.ReactNode[] = [];
-  tabs.forEach((t, i) => {
+  shown.forEach((t) => {
     if (t.id !== drag?.tabId) {
       if (k === marker) items.push(<span key="drop" className="tab-drop" aria-hidden="true" />);
       k++;
     }
-    items.push(<FolderTab key={t.id} tab={t} active={t.id === win.activeTabId} index={i} draggable showClose="always" onMenu={onMenu} />);
+    items.push(<FolderTab key={t.id} tab={t} active={t.id === activeId} index={tabs.indexOf(t)} draggable={draggable} onMenu={onMenu} />);
   });
-  if (marker >= k) items.push(<span key="drop" className="tab-drop" aria-hidden="true" />);
+  if (marker >= k && marker >= 0) items.push(<span key="drop" className="tab-drop" aria-hidden="true" />);
+  return (
+    <div
+      className={`tab-strip${stacked ? ' stacked' : ''}`}
+      ref={ref}
+      data-strip={stripId}
+      role="tablist"
+      style={{ '--tab-count': shown.length } as CSSProperties}
+    >
+      {items}
+      {stacked && (
+        <button
+          type="button"
+          className={`tab-stack${list ? ' open' : ''}`}
+          aria-label={`See ${tabs.length - 1} more tabs`}
+          aria-haspopup="menu"
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            window.clearTimeout(tipTimer.current);
+            setTip(null);
+            setList(list ? null : { x: r.left, y: r.bottom - 2 });
+          }}
+          onMouseEnter={(e) => {
+            const at = { x: e.clientX, y: e.clientY };
+            window.clearTimeout(tipTimer.current);
+            tipTimer.current = window.setTimeout(() => setTip(at), TOOLTIP_DELAY_MS);
+          }}
+          onMouseLeave={() => {
+            window.clearTimeout(tipTimer.current);
+            setTip(null);
+          }}
+        >
+          <StackIcon />
+          <span className="tab-stack-count">{tabs.length - 1}</span>
+        </button>
+      )}
+      {tip && !list && <TokTip x={tip.x} y={tip.y} branches={0} text="see all tabs" />}
+      {list && <TabListMenu tabs={tabs.filter((t) => t.id !== activeId)} activeId={activeId} {...list} onClose={() => setList(null)} />}
+    </div>
+  );
+}
+
+/** A window's tab row and its close-window button. */
+function TabStrip({ win, tabs, onMenu }: { win: Win; tabs: Tab[]; onMenu: (tabId: string, x: number, y: number) => void }) {
   return (
     <div className="col-head">
-      <div className="tab-strip" data-strip={win.id} role="tablist" aria-label="Tabs in this window">
-        {items}
-      </div>
+      <TabRow tabs={tabs} activeId={win.activeTabId} stripId={win.id} draggable onMenu={onMenu} />
       <div className="col-head-actions">
-        <button className="icon-btn" title="Close window" aria-label="Close window" onClick={() => useLoom.getState().closeWindow(win.id)}>
+        <button className="icon-btn win-close" title="Close window" aria-label="Close window" onClick={() => useLoom.getState().closeWindow(win.id)}>
           <CloseWindowIcon />
         </button>
       </div>
@@ -849,11 +992,12 @@ function TabStrip({ win, tabs, onMenu }: { win: Win; tabs: Tab[]; onMenu: (tabId
   );
 }
 
-function Resizer({ win }: { win: Win }) {
+function Resizer({ win, style }: { win: Win; style?: CSSProperties }) {
   const resize = useLoom((s) => s.resizeWindow);
   return (
     <div
       className="col-resizer"
+      style={style}
       role="separator"
       aria-orientation="vertical"
       aria-label="Resize this window"
@@ -878,7 +1022,7 @@ function Resizer({ win }: { win: Win }) {
 }
 
 /** One chat window: its tab row, the showing tab's messages and chat box. */
-function WindowColumn({ win, active, onMenu }: { win: Win; active: boolean; onMenu: (tabId: string, x: number, y: number) => void }) {
+function WindowColumn({ win, active, last, onMenu }: { win: Win; active: boolean; last: boolean; onMenu: (tabId: string, x: number, y: number) => void }) {
   const allTabs = useLoom((s) => s.tabs);
   const tabs = win.tabIds.map((id) => allTabs.find((t) => t.id === id)).filter((t): t is Tab => !!t);
   const tab = tabs.find((t) => t.id === win.activeTabId) ?? tabs[0];
@@ -900,7 +1044,8 @@ function WindowColumn({ win, active, onMenu }: { win: Win; active: boolean; onMe
       <TabStrip win={win} tabs={tabs} onMenu={onMenu} />
       <Messages key={tab.id} tab={tab} />
       <Composer key={`c-${tab.id}`} tab={tab} />
-      <Resizer win={win} />
+      {/* the last window's handle lives outside the scrolling sidebar so it can straddle the edge */}
+      {!last && <Resizer win={win} />}
     </section>
   );
 }
@@ -965,17 +1110,7 @@ export function MobileChat() {
           <SidebarToggle />
         </div>
         <nav className="m-tabrow" aria-label="Open chats">
-          {ordered.map((t, i) => (
-            <FolderTab
-              key={t.id}
-              tab={t}
-              active={t.id === tab.id}
-              index={i}
-              draggable={false}
-              showClose="active"
-              onMenu={(tabId, x, y) => setMenu({ tabId, x, y })}
-            />
-          ))}
+          <TabRow tabs={ordered} activeId={tab.id} draggable={false} onMenu={(tabId, x, y) => setMenu({ tabId, x, y })} />
         </nav>
       </div>
       <Messages key={tab.id} tab={tab} />
@@ -992,6 +1127,8 @@ export function Sidebar() {
   const folded = useLoom((s) => s.sidebarFolded);
   const [menu, setMenu] = useState<{ tabId: string; x: number; y: number } | null>(null);
   const onMenu = (tabId: string, x: number, y: number) => setMenu({ tabId, x, y });
+  const lastWin = windows[windows.length - 1];
+  const lastColor = tabs.find((t) => t.id === lastWin?.activeTabId)?.color ?? 0;
 
   // no chats open: no sidebar at all, the canvas takes the space
   if (!tabs.length) return <TabDragGhost />;
@@ -1013,12 +1150,15 @@ export function Sidebar() {
   }
 
   return (
-    <aside className="sidebar" aria-label="Chat windows">
-      {windows.map((w) => (
-        <WindowColumn key={w.id} win={w} active={w.id === activeWindowId} onMenu={onMenu} />
-      ))}
-      {menu && <TabMenu {...menu} onClose={() => setMenu(null)} />}
-      <TabDragGhost />
-    </aside>
+    <div className="sidebar-wrap">
+      <aside className="sidebar" aria-label="Chat windows">
+        {windows.map((w, i) => (
+          <WindowColumn key={w.id} win={w} active={w.id === activeWindowId} last={i === windows.length - 1} onMenu={onMenu} />
+        ))}
+        {menu && <TabMenu {...menu} onClose={() => setMenu(null)} />}
+        <TabDragGhost />
+      </aside>
+      {lastWin && <Resizer win={lastWin} style={{ '--c': colorOf(lastColor).core } as CSSProperties} />}
+    </div>
   );
 }

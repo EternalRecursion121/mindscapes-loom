@@ -6,7 +6,7 @@ import robotLines from '../assets/robot-lines.png';
 import robotFill from '../assets/robot-fill.png';
 
 /** color: thread colour if the node is on an open chat's path; selected: colour of the chat currently on this node */
-export type LoomData = { color?: number; selected?: number };
+export type LoomData = { color?: number; selected?: number; parked?: number };
 export type LoomFlowNode = Node<LoomData, 'loom'>;
 export type RootFlowNode = Node<LoomData, 'root'>;
 
@@ -45,12 +45,14 @@ export const LoomNodeView = memo(function LoomNodeView({ id, data }: NodeProps<L
     '--f': c.fringe,
     '--sel': data.selected === undefined ? undefined : colorOf(data.selected).core,
     '--sel-dark': data.selected === undefined ? undefined : colorOf(data.selected).dark,
+    '--park': data.parked === undefined ? undefined : colorOf(data.parked).core,
   } as CSSProperties;
   return (
     <div
       className="lnode nopan nodrag"
       data-threaded={data.color !== undefined || undefined}
       data-selected={data.selected !== undefined || undefined}
+      data-parked={data.parked !== undefined || undefined}
       data-picked={picked || undefined}
       data-linked={linked || undefined}
       data-generating={generating || undefined}

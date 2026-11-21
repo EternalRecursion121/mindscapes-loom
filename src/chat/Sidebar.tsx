@@ -147,6 +147,32 @@ const TREE_TOKENS_MAX = 8;
  * the branches stop agreeing (not highlighted: in the chat, the highlight means "branches split
  * here", which these words aren't). Click a box to go to that branch.
  */
+/**
+ * Hovering something in the chat that stands for a node outlines that node on the canvas. The
+ * outline is cleared on mouse-leave and also when the thing disappears under the mouse (a tab
+ * closed with its ×, a list row picked), which never fires mouse-leave.
+ */
+function useLinkHover(id: string) {
+  const over = useRef(false);
+  useEffect(
+    () => () => {
+      if (over.current && useUi.getState().linkHover === id) useUi.getState().set({ linkHover: null });
+      over.current = false;
+    },
+    [id],
+  );
+  return {
+    onMouseEnter: () => {
+      over.current = true;
+      useUi.getState().set({ linkHover: id });
+    },
+    onMouseLeave: () => {
+      over.current = false;
+      if (useUi.getState().linkHover === id) useUi.getState().set({ linkHover: null });
+    },
+  };
+}
+
 function ForkTree({ kids, onPick }: { kids: string[]; onPick: (id: string) => void }) {
   const nodes = useLoom((s) => s.nodes);
   const lists = kids.map((id) => {
@@ -161,6 +187,14 @@ function ForkTree({ kids, onPick }: { kids: string[]; onPick: (id: string) => vo
   const longest = Math.max(...lists.map((l) => l.words.length), 0);
   while (div < longest && lists.every((l) => l.words[div] !== undefined && l.words[div] === lists[0].words[div])) div++;
   const show = Math.min(TREE_TOKENS_MAX, Math.max(TREE_TOKENS_MIN, div + 4));
+  const kidsKey = kids.join(',');
+  useEffect(
+    () => () => {
+      const h = useUi.getState().linkHover;
+      if (h && kidsKey.split(',').includes(h)) useUi.getState().set({ linkHover: null });
+    },
+    [kidsKey],
+  );
   return (
     <div className="fork-tree" role="list" aria-label={`${kids.length} branch${kids.length > 1 ? 'es' : ''} continue from here`}>
       {lists.map((l) => (
@@ -649,6 +683,7 @@ function FolderTab({
   onMenu: (tabId: string, x: number, y: number) => void;
 }) {
   const [editing, setEditing] = useState(false);
+  const linkHover = useLinkHover(tab.headId);
   const L = useLoom.getState();
   const label = useTabLabel(tab);
   const c = colorOf(tab.color);
@@ -698,8 +733,7 @@ function FolderTab({
       aria-selected={active}
       onClick={() => !active && L.setActiveTab(tab.id)}
       // hovering a tab outlines its node on the canvas, like hovering the node itself
-      onMouseEnter={() => useUi.getState().set({ linkHover: tab.headId })}
-      onMouseLeave={() => useUi.getState().linkHover === tab.headId && useUi.getState().set({ linkHover: null })}
+      {...linkHover}
       onAuxClick={(e) => {
         if (e.button === 1) {
           e.preventDefault();
@@ -863,12 +897,12 @@ function TabListMenu({ tabs, activeId, x, y, onClose }: { tabs: Tab[]; activeId:
 }
 function TabListRow({ tab, current, onPicked }: { tab: Tab; current: boolean; onPicked: () => void }) {
   const label = useTabLabel(tab);
+  const linkHover = useLinkHover(tab.headId);
   const L = useLoom.getState();
   return (
     <div
       className={`tab-list-row${current ? ' current' : ''}`}
-      onMouseEnter={() => useUi.getState().set({ linkHover: tab.headId })}
-      onMouseLeave={() => useUi.getState().linkHover === tab.headId && useUi.getState().set({ linkHover: null })}
+      {...linkHover}
     >
       <button
         role="menuitem"

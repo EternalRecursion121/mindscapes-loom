@@ -174,7 +174,16 @@ export interface LoomState {
   /** new empty leaf child, opened in chat so you can type its first message */
   forkForWriting(nodeId: string, pos?: { x: number; y: number }): void;
   /** fork at a point and either let the model write the next message ('generate') or leave it for you ('write') */
-  forkAtPoint(tabId: string, nodeId: string, msg: number, offset: number, kind: 'generate' | 'write', count?: number): void;
+  forkAtPoint(
+    tabId: string,
+    nodeId: string,
+    msg: number,
+    offset: number,
+    kind: 'generate' | 'write',
+    count?: number,
+    /** start the new branch with this model token (one of the alternatives the model had here), then carry on */
+    seed?: { tok: { t: string; lp: number; top?: [string, number][] }; model?: string },
+  ): void;
   /**
    * Add what you typed to the end of a chat, in a voice. Two messages in one voice never follow
    * each other: the text joins the last message when that one is in the same voice. `auto`: the
@@ -857,7 +866,7 @@ export const useLoom = create<LoomState>()((set, get) => {
       get().openInChat(id, true);
     },
 
-    forkAtPoint(tabId, nodeId, msg, offset, kind, count = 1) {
+    forkAtPoint(tabId, nodeId, msg, offset, kind, count = 1, seed) {
       const N = get().nodes[nodeId];
       if (!N?.messages[msg]) return;
       if (N.messages[msg].generating) {
@@ -889,13 +898,35 @@ export const useLoom = create<LoomState>()((set, get) => {
         voice = offset > 0 ? 'model' : N.messages[msg].role;
       }
       let id = '';
-      for (let i = 0; i < (kind === 'generate' ? count : 1); i++) {
-        id =
-          kind === 'generate'
-            ? addChild(parent, at, [{ role: voice, text: '', generating: true }])
-            : addChild(parent, at, []);
-        if (kind === 'generate') startStream(id, 0);
-      }
+      if (seed && kind === 'generate') {
+        const { t, lp, top } = seed.tok;
+        id = addChild(parent, at, [
+          {
+            // the voice of the message the token was in (the model may have been writing as you)
+            role: N.messages[msg].role,
+            text: t,
+            toks: [{ o: 0, t, lp, ...(top ? { top } : {}) }],
+            spans: [{ s: 0, e: t.length, model: seed.model ?? 'model', at: Date.now() }],
+            generating: true,
+          },
+        ]);
+        // the token starts a message of its own: drop its leading space, as a fresh reply would
+        const turns = turnsFor(get().nodes, id);
+        if (turns[turns.length - 1]?.text === t && /^\s/.test(t)) {
+          const n = get().nodes[id];
+          const body = t.trimStart();
+          const m: Message = { ...n.messages[0], text: body, toks: [{ o: 0, t: body, lp, ...(top ? { top } : {}) }], spans: [{ ...n.messages[0].spans![0], e: body.length }] };
+          set((st) => ({ nodes: { ...st.nodes, [id]: { ...n, messages: [m] } } }));
+        }
+        startStream(id, 0, seed.model);
+      } else
+        for (let i = 0; i < (kind === 'generate' ? count : 1); i++) {
+          id =
+            kind === 'generate'
+              ? addChild(parent, at, [{ role: voice, text: '', generating: true }])
+              : addChild(parent, at, []);
+          if (kind === 'generate') startStream(id, 0);
+        }
       setHead(tabId, id);
       if (kind === 'write') set({ focusRequest: { tabId, n: Date.now() } });
     },

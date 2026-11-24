@@ -190,6 +190,7 @@ export function SettingsPanel() {
   const models = useSettings((s) => s.models);
   const sampling = useSettings((s) => s.sampling);
   const format = useSettings((s) => s.format);
+  const shade = useSettings((s) => s.shade);
   const [adding, setAdding] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const S = useSettings.getState();
@@ -280,6 +281,10 @@ export function SettingsPanel() {
           </Field>
         </div>
         <p className="set-hint">Alternatives: how many other tokens to record at each position (0 records no probabilities).</p>
+        <label className="set-check">
+          <input type="checkbox" checked={shade} onChange={(e) => S.setShade(e.target.checked)} />
+          fade words the model thought unlikely
+        </label>
       </section>
 
       <section>

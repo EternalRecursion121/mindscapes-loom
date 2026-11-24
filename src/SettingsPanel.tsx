@@ -6,7 +6,8 @@ import { modelConfig } from './model/client';
 
 /*
  * Settings: a panel over the canvas's right side. Models (several can be on at once: branches
- * take turns between them), sampling, and how a conversation is written out for a base model.
+ * take turns between them), sampling, how a conversation is written out for a base model, and
+ * the loom file (export / import / start over).
  */
 
 export function SettingsButton() {
@@ -15,7 +16,7 @@ export function SettingsButton() {
     <button
       className="icon-btn big"
       onClick={() => useSettings.getState().setOpen(!open)}
-      title="Settings: models and sampling"
+      title="Settings: models, sampling, loom file"
       aria-label="Settings"
       aria-pressed={open}
     >
@@ -185,6 +186,60 @@ function ModelCard({ m }: { m: ModelProfile }) {
   );
 }
 
+function LoomFile() {
+  const L = useLoom.getState();
+  const file = useRef<HTMLInputElement>(null);
+  const [confirmReset, setConfirmReset] = useState(false);
+  useEffect(() => {
+    if (!confirmReset) return;
+    const t = setTimeout(() => setConfirmReset(false), 4000);
+    return () => clearTimeout(t);
+  }, [confirmReset]);
+  const download = () => {
+    const url = URL.createObjectURL(new Blob([L.exportLoom()], { type: 'application/json' }));
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `loom-${new Date().toISOString().slice(0, 10)}.loom.json`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  return (
+    <div className="set-row">
+      <button type="button" className="set-btn" onClick={download}>
+        export loom
+      </button>
+      <button type="button" className="set-btn" onClick={() => file.current?.click()}>
+        import loom…
+      </button>
+      <input
+        ref={file}
+        type="file"
+        accept=".json,application/json"
+        hidden
+        onChange={async (e) => {
+          const f = e.target.files?.[0];
+          e.target.value = '';
+          if (!f) return;
+          const err = L.importLoom(await f.text());
+          L.showToast(err ?? `Opened ${f.name}`);
+        }}
+      />
+      <button
+        type="button"
+        className={`set-btn${confirmReset ? ' danger' : ''}`}
+        onClick={() => {
+          if (!confirmReset) return setConfirmReset(true);
+          setConfirmReset(false);
+          L.reset();
+          L.showToast('Started over with the sample loom');
+        }}
+      >
+        {confirmReset ? 'really start over?' : 'start over'}
+      </button>
+    </div>
+  );
+}
+
 export function SettingsPanel() {
   const open = useSettings((s) => s.open);
   const models = useSettings((s) => s.models);
@@ -324,6 +379,12 @@ export function SettingsPanel() {
         </Field>
         <span className="set-label">what the model sees</span>
         <pre className="set-preview">{example}</pre>
+      </section>
+
+      <section>
+        <h3>Loom file</h3>
+        <p className="set-hint">Your loom saves itself in this browser. Export it to keep a copy or move it elsewhere.</p>
+        <LoomFile />
       </section>
 
     </aside>

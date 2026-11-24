@@ -185,6 +185,10 @@ export interface LoomState {
   promptModel(tabId: string, role: Role): void;
   /** stop what the model is writing (or waiting to write) in a chat; the words so far stay */
   stopGenerating(tabId: string): void;
+  /** the whole loom as a file (no settings or API keys) */
+  exportLoom(): string;
+  /** replace the loom with one from a file; returns an error message, or null */
+  importLoom(text: string): string | null;
   deleteSubtree(id: string): void;
   hideNode(id: string): void;
   showAllBelow(id: string): void;
@@ -464,6 +468,7 @@ function seed() {
 // the interview build shares a site with the loom: its saves are its own, and the loom's are not ours to read
 const SAVE_KEY = 'mindscapes-loom-interview-v1';
 const OLD_SAVE_KEY = 'mindscapes-loom-interview-v0'; // never written
+const LOOM_FORMAT = 'mindscapes-loom';
 type Saved = ReturnType<typeof seed>;
 
 function load(): Saved | null {
@@ -485,16 +490,65 @@ function load(): Saved | null {
       const activeWindowId = windows.find((w) => w.tabIds.includes(o.activeTabId ?? ''))?.id ?? windows[0]?.id ?? null;
       s = { ...o, tabs, windows, activeWindowId };
     }
-    for (const n of Object.values(s.nodes)) {
-      // a reply the model had not begun when the page closed (it can take minutes to load) would
-      // come back as an empty message waiting for your words in the model's voice: drop it
-      n.messages = n.messages.filter((m) => !(m.generating && !m.text));
-      for (const m of n.messages) m.generating = false;
-    }
-    return s;
+    const n = normalizeSaved(s);
+    return typeof n === 'string' ? null : n;
   } catch {
     return null;
   }
+}
+
+/**
+ * Check a saved loom (from storage or a file) hangs together, and clean what's safe to clean:
+ * nothing is generating, every child list points at real nodes, tabs on missing nodes go to the
+ * root. Returns an error message for anything it can't trust.
+ */
+function normalizeSaved(o: Partial<Saved>): Saved | string {
+  const nodesIn = o.nodes;
+  if (!nodesIn || typeof nodesIn !== 'object') return 'The file has no nodes.';
+  const rootId = typeof o.rootId === 'string' ? o.rootId : '';
+  if (!nodesIn[rootId]) return "The file's root node is missing.";
+  const nodes: Nodes = {};
+  for (const [k, n] of Object.entries(nodesIn)) {
+    if (!n || typeof n !== 'object' || !Array.isArray(n.messages)) return `Node ${k} is malformed.`;
+    if (n.parentId !== null && !nodesIn[n.parentId]) return `Node ${k} points at a parent that isn't there.`;
+    nodes[k] = {
+      ...n,
+      id: k,
+      x: Number.isFinite(n.x) ? n.x : 0,
+      y: Number.isFinite(n.y) ? n.y : 0,
+      hidden: !!n.hidden,
+      // a reply the model had not begun when the page closed (it can take minutes to load) would
+      // come back as an empty message waiting for your words in the model's voice: drop it
+      messages: n.messages
+        .filter((m) => m && (m.role === 'user' || m.role === 'model') && typeof m.text === 'string' && !(m.generating && !m.text))
+        .map((m) => ({ ...m, generating: false })),
+    };
+  }
+  // children are rebuilt from the parents (in the saved order where there is one)
+  const children: Kids = {};
+  for (const k of Object.keys(nodes)) children[k] = [];
+  const order = o.children ?? {};
+  for (const [p, list] of Object.entries(order))
+    if (children[p] && Array.isArray(list)) for (const c of list) if (nodes[c]?.parentId === p && !children[p].includes(c)) children[p].push(c);
+  for (const n of Object.values(nodes)) if (n.parentId && !children[n.parentId].includes(n.id)) children[n.parentId].push(n.id);
+  const tabs: Tab[] = (Array.isArray(o.tabs) ? o.tabs : [])
+    .filter((t) => t && typeof t.id === 'string')
+    .map((t) => ({ id: t.id, name: typeof t.name === 'string' ? t.name : '', headId: nodes[t.headId] ? t.headId : rootId, color: Number(t.color) || 0 }));
+  const windows: Win[] = (Array.isArray(o.windows) ? o.windows : [])
+    .filter((w) => w && Array.isArray(w.tabIds))
+    .map((w) => ({ ...w, width: Number.isFinite(w.width) ? w.width : WIN_W }));
+  return {
+    nodes,
+    children,
+    rootId,
+    tabs,
+    windows,
+    activeWindowId: o.activeWindowId ?? null,
+    activeTabId: o.activeTabId ?? null,
+    sidebarFolded: !!o.sidebarFolded,
+    tabCounter: Number(o.tabCounter) || tabs.length,
+    colorCounter: Number(o.colorCounter) || tabs.length,
+  };
 }
 
 /**
@@ -1181,6 +1235,34 @@ export const useLoom = create<LoomState>()((set, get) => {
       else setHead(tabId, nodeId);
     },
 
+    exportLoom() {
+      const { nodes, children, rootId, tabs, windows, activeWindowId, activeTabId, tabCounter, colorCounter } = get();
+      const clean: Nodes = {};
+      for (const [k, n] of Object.entries(nodes)) clean[k] = { ...n, messages: n.messages.map(({ generating: _g, ...m }) => m) };
+      return JSON.stringify(
+        { format: LOOM_FORMAT, version: 1, savedAt: new Date().toISOString(), nodes: clean, children, rootId, tabs, windows, activeWindowId, activeTabId, tabCounter, colorCounter },
+        null,
+        1,
+      );
+    },
+
+    importLoom(text) {
+      let o: unknown;
+      try {
+        o = JSON.parse(text);
+      } catch {
+        return "That file isn't JSON.";
+      }
+      if ((o as { format?: string })?.format !== LOOM_FORMAT) return "That file isn't a mindscapes loom.";
+      const n = normalizeSaved(o as Partial<Saved>);
+      if (typeof n === 'string') return n;
+      for (const h of [...streams.values()]) h.cancel();
+      streams.clear();
+      targets.clear();
+      set({ ...n, ...settleWindows(n.tabs, n.windows, n.activeWindowId), past: [], future: [], streamOrder: [], structure: get().structure + 1 });
+      return null;
+    },
+
     showToast(text) {
       set({ toast: { text, n: Date.now() } });
     },
@@ -1201,6 +1283,7 @@ export const useLoom = create<LoomState>()((set, get) => {
 
 // debounced save
 let saveTimer: number | undefined;
+let saveWarned = false;
 useLoom.subscribe((s) => {
   window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(() => {
@@ -1210,8 +1293,13 @@ useLoom.subscribe((s) => {
         SAVE_KEY,
         JSON.stringify({ nodes, children, rootId, tabs, windows, activeWindowId, activeTabId, sidebarFolded, tabCounter, colorCounter }),
       );
+      saveWarned = false;
     } catch {
-      /* storage unavailable */
+      // say so once (the toast itself changes the store, which would land back here)
+      if (!saveWarned) {
+        saveWarned = true;
+        useLoom.getState().showToast("Couldn't save in this browser (storage full or blocked). Export the loom from settings to keep it.");
+      }
     }
   }, 500);
 });

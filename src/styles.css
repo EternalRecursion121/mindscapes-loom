@@ -220,9 +220,27 @@ button { font: inherit; color: inherit; }
   justify-content: space-between;
   height: 44px;
   padding: 0 8px 0 10px;
-  /* the line under the tab row, drawn inside the header so the current tab can cover it */
-  box-shadow: inset 0 -1px 0 var(--ink-faint);
+  /* the line under the tab row: the current tab's outline carried on to both ends of the window,
+     in the window's own colour */
+  --tab-line: color-mix(in srgb, var(--c) 60%, transparent);
+  position: relative;
   flex: none;
+}
+/* drawn over the other tabs (their grey sides stop under it) and under the current tab, which opens into the chat */
+.col-head::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 1px;
+  background: var(--tab-line);
+  z-index: 1;
+  pointer-events: none;
+}
+.col-head .folder-tab.active { position: relative; z-index: 2; }
+@supports (color: oklch(from red l c h)) {
+  .col-head { --tab-line: oklch(from var(--c) max(l, 0.74) c h); }
 }
 .folder-tab {
   display: flex;
@@ -236,7 +254,7 @@ button { font: inherit; color: inherit; }
   border-radius: 11px 11px 0 0;
   background: var(--panel);
 }
-/* tabs you're not on sit on the header line (their own bottom edge draws it over their fill) */
+/* tabs you're not on keep a grey bottom edge under the header line */
 .folder-tab:not(.active) { border-bottom-color: var(--ink-faint); }
 .folder-tab.active { background: var(--panel-hi); border-color: color-mix(in srgb, var(--c) 60%, transparent); border-color: oklch(from var(--c) max(l, 0.74) c h); border-bottom-color: var(--panel-hi); }
 .folder-tab .pip { flex: none; width: 11px; height: 11px; border-radius: 4px; background: var(--surface); }
@@ -253,7 +271,11 @@ button { font: inherit; color: inherit; }
   mask-image: linear-gradient(to right, #000 calc(100% - 20px), transparent);
 }
 .tab-name-input {
-  width: 90px;
+  /* takes exactly the name's place, so renaming never widens the tab */
+  flex: 1;
+  min-width: 0;
+  width: 0;
+  padding: 0;
   font: 14px var(--font-head);
   color: var(--ink);
   border: 0;
@@ -266,15 +288,14 @@ button { font: inherit; color: inherit; }
 .tab-strip { display: flex; align-items: flex-end; gap: 3px; min-width: 0; flex: 1; height: 100%; overflow-x: auto; scrollbar-width: none; }
 .tab-strip::-webkit-scrollbar { display: none; }
 .tab-strip .folder-tab { flex: 1 1 0; min-width: 0; max-width: 136px; cursor: pointer; }
-/* stacked: the current tab on the left, every tab behind the stack tab on the right */
-.tab-strip.stacked .folder-tab { max-width: none; }
+/* stacked: the current tab on the left, every tab behind the stack tab beside it. The tab keeps
+   the width limit of any tab: it never stretches across the window */
 .tab-stack {
   flex: none;
   display: flex;
   align-items: center;
   gap: 4px;
   height: 32px;
-  margin-left: auto;
   padding: 0 9px;
   border: 1px solid var(--ink-faint);
   border-radius: 11px 11px 0 0;
@@ -350,18 +371,18 @@ button { font: inherit; color: inherit; }
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 18px 16px 24px;
+  padding: 0 16px 24px; /* the room above the first message and between messages is the gaps' (.gap) */
   display: flex;
   flex-direction: column;
-  gap: 22px;
   background: var(--panel-hi);
   scrollbar-width: thin;
   scrollbar-color: color-mix(in srgb, var(--olive) 30%, transparent) transparent; /* dim until the mouse is over it */
 }
 .col:not(.active) .msgs { background: var(--panel); }
+.col:not(.active) .fork-tree { --line: color-mix(in srgb, #eceaef 45%, var(--panel)); }
 /* the current tab is always the same colour as the chat under it */
 .col:not(.active) .folder-tab.active { background: var(--panel); border-bottom-color: var(--panel); }
-.msgs-empty { color: var(--ink-soft); line-height: 1.55; margin: 8px 4px; font-size: 13.5px; }
+.msgs-empty { color: var(--ink-soft); line-height: 1.55; margin: 26px 4px 8px; font-size: 13.5px; }
 
 .bubble {
   position: relative;
@@ -383,33 +404,99 @@ button { font: inherit; color: inherit; }
   background: var(--bubble-user);
   font: 14.5px/1.5 var(--font-user);
 }
-.tag {
-  position: absolute;
-  padding: 1px 3px;
+/* the space between two messages: a point you can fork at. A thin line in the highlight colour
+   shows under the mouse, and stays (with a count) where other branches already part */
+.gap {
+  position: relative;
+  flex: none;
+  width: 100%;
+  height: 22px;
+  padding: 0;
   border: 0;
-  border-radius: 5px;
   background: transparent;
-  font: 13px var(--font-ui);
-  color: var(--ink-soft);
-  white-space: nowrap;
   cursor: pointer;
 }
-.tag:hover { color: var(--ink); background: var(--loom); }
-.tag.loomed { color: var(--ink); background: var(--loom); }
-.bubble.model .tag { right: -44px; }
-.bubble.user .tag { left: -36px; }
-.tag.top { top: 2px; }
-.tag.bottom { bottom: 2px; }
+.gap::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 2px;
+  margin-top: -1px;
+  border-radius: 1px;
+  background: var(--loom-line);
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.gap:hover::before, .gap:focus-visible::before, .gap.loomed::before { opacity: 1; }
+.gap:focus-visible { outline: none; }
+.gap-n {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  padding: 1px 7px;
+  border-radius: 4px; /* text: the menus' corners */
+  background: color-mix(in srgb, rgb(185, 160, 188) 38%, var(--node));
+  font: 11px/1.2 var(--font-ui);
+  color: var(--ink);
+}
 
+/* any word can be clicked to fork there; it stays lit where another branch parts in the middle of a message */
 .tok { border-radius: 4px; cursor: pointer; }
-.tok:hover { background: var(--loom); box-shadow: 0 0 0 2px var(--loom); }
-.tok.loomed { background: var(--loom); box-shadow: 0 0 0 2px var(--loom); }
+.tok:hover, .tok.loomed { background: var(--loom); box-shadow: 0 0 0 2px var(--loom); }
+.waiting { font: italic 12.5px var(--font-ui); color: var(--ink-soft); }
+
+/* the robot with a speech bubble: the model writes here. It keeps its room at all times and
+   shows while the mouse is over its side of the chat, so the chat never jumps */
+.robot-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--ink-faint);
+  border-radius: 999px; /* an icon button: fully round, like the send and ⋮ buttons */
+  background: transparent;
+  color: var(--olive);
+  /* in a line of text: centred on the lowercase letters, and taller than the line without pushing the lines apart */
+  vertical-align: middle;
+  margin-block: -6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.bubble .robot-btn { margin-left: 7px; }
+.robot-says { flex: none; }
+.robot-ico {
+  width: 35px;
+  height: 23px;
+  background: currentColor;
+  mask-size: contain;
+  mask-repeat: no-repeat;
+  mask-position: center;
+  -webkit-mask-size: contain;
+  -webkit-mask-repeat: no-repeat;
+  -webkit-mask-position: center;
+}
+.msgs[data-side='left'] .robot-btn.left, .msgs[data-side='right'] .robot-btn.right, .robot-btn:hover, .robot-btn:focus-visible { opacity: 1; }
+.robot-btn:hover { background: var(--surface-hi); color: var(--ink); }
+.robot-btn:disabled { opacity: 0 !important; pointer-events: none; }
+@media (hover: none) {
+  .robot-btn { opacity: 1; }
+}
+/* where the next message would be */
+.ghost-row { flex: none; display: flex; align-items: center; min-height: 34px; }
+.ghost-row .robot-btn.right { margin-left: auto; }
 /* branches from the end of the conversation: a Reddit-style thread line into a sideways-scrolling row */
 .fork-tree {
-  --line: rgba(236, 234, 239, 0.45);
+  /* opaque: the same shade a 45% white line would have on the chat background, so where lines
+     cross or meet they don't add up to a brighter spot */
+  --line: color-mix(in srgb, #eceaef 45%, var(--panel-hi));
   display: flex;
   gap: 8px;
-  margin-top: -22px; /* cancel the message gap: the stem starts right at the last message */
+  flex: none; /* it scrolls sideways, so in the chat's column it would be squashed flat when the chat is long */
   padding: 0 2px 8px 2px;
   overflow-x: auto;
   scrollbar-width: thin;
@@ -486,9 +573,9 @@ button { font: inherit; color: inherit; }
 
 .composer { padding: 10px 12px 14px; flex: none; border-top: 1px solid var(--ink-faint); background: inherit; }
 .composer-hint { margin: 0 6px 8px; font-size: 12px; color: var(--ink-soft); }
-.composer-row { display: flex; align-items: center; gap: 8px; }
+.composer-row { display: flex; align-items: center; gap: 4px; }
 .composer-row .composer-box { flex: 1; min-width: 0; }
-.composer-plus {
+.composer-dots {
   flex: none;
   width: 34px;
   height: 34px;
@@ -498,15 +585,10 @@ button { font: inherit; color: inherit; }
   border: 0;
   border-radius: 50%;
   background: transparent;
-  color: var(--ink-soft);
+  color: oklch(from var(--c) max(l, 0.74) c h); /* the chat box outline's colour */
   cursor: pointer;
 }
-/* the + takes the chat box outline's colour */
-.composer-plus { color: oklch(from var(--c) max(l, 0.74) c h); }
-.composer-plus svg { width: 19px; height: 19px; }
-.composer-plus:hover, .composer-plus[aria-expanded='true'] { background: var(--surface-hi); }
-/* an open token: the message has started (its tag shows) but nothing is written in it yet */
-.bubble.open-token { min-width: 46px; min-height: 2.2em; padding: 6px 12px; opacity: 0.7; }
+.composer-dots:hover, .composer-dots[aria-expanded='true'] { background: var(--surface-hi); }
 .composer-box {
   display: flex;
   align-items: flex-end;
@@ -545,6 +627,7 @@ button { font: inherit; color: inherit; }
   cursor: pointer;
 }
 .send:disabled { background: var(--ink-faint); color: var(--ink-soft); cursor: default; }
+.send.stop { background: var(--ink); color: var(--abyss); }
 
 /* ---------- canvas ---------- */
 .canvas { position: relative; flex: 1; min-width: 0; background: var(--canvas); overflow: hidden; }
@@ -713,6 +796,43 @@ button { font: inherit; color: inherit; }
 .has-sub { position: relative; }
 .chev { font-size: 17px; line-height: 0.6; }
 .node-menu.sub { z-index: 71; } /* placed by Flyout so it always stays on screen */
+.menu-head {
+  padding: 7px 11px 6px;
+  border-bottom: 1px solid var(--ink-faint);
+  font: 11px var(--font-ui);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+.node-menu button.fork-pick { justify-content: flex-start; }
+/* the chat box's ⋮ menu: it opens above the button */
+.node-menu.chat-menu { width: 276px; max-width: calc(100vw - 16px); }
+.chat-menu-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 10px 11px;
+  border-bottom: 1px solid var(--ink-faint);
+  font: 12.5px var(--font-ui);
+}
+.chat-menu-val { display: inline-flex; align-items: center; gap: 7px; letter-spacing: 0.05em; text-transform: uppercase; }
+.node-menu .tick { color: var(--olive); }
+/* off: black, the knob on the left. on: green, the knob on the right */
+.node-menu button.switch, .node-menu button.switch:hover:not(:disabled) {
+  flex: none;
+  display: block;
+  width: 36px;
+  height: 20px;
+  padding: 2px;
+  border: 1px solid var(--ink-soft);
+  border-radius: 10px;
+  background: #000;
+}
+.node-menu button.switch:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; background: #000; }
+.node-menu button.switch[aria-checked='true'], .node-menu button.switch[aria-checked='true']:hover:not(:disabled) { background: #4f9a5b; border-color: #4f9a5b; }
+.switch .knob { display: block; width: 14px; height: 14px; border-radius: 50%; background: var(--ink); transition: transform 0.12s; }
+.switch[aria-checked='true'] .knob { transform: translateX(16px); }
 
 .toast {
   position: fixed;
@@ -785,3 +905,29 @@ button { font: inherit; color: inherit; }
 
 /* scrollbars brighten only while the mouse is over the area they scroll */
 .msgs:hover, .fork-tree:hover { scrollbar-color: var(--olive) transparent; }
+
+/* the in-browser model's state, beside undo and redo */
+.model-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  margin-right: 6px;
+  padding: 0 11px;
+  border: 1px solid var(--ink-faint);
+  border-radius: 4px; /* text: the menus' corners (round is for icon buttons) */
+  background: var(--surface);
+  color: var(--ink-soft);
+  font: 12px var(--font-ui);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.model-pill:hover:not(:disabled) { color: var(--ink); }
+.model-pill:disabled { cursor: default; }
+.model-dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--connector); }
+.model-pill.loading .model-dot { background: var(--olive); animation: model-pulse 1s ease-in-out infinite; }
+.model-pill.ready .model-dot { background: var(--olive); }
+.model-pill.error { color: var(--danger); }
+.model-pill.error .model-dot { background: var(--danger); }
+@keyframes model-pulse { 50% { opacity: 0.3; } }
+.app.mobile .model-text { max-width: 44vw; overflow: hidden; text-overflow: ellipsis; }

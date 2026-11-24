@@ -1,35 +1,35 @@
-// Model shim. Swap `streamCompletion` for a real backend later; everything else
-// only depends on its signature: given the context, yield text chunks.
+import { generate } from './model/client';
+import type { ChatTurn } from './model/protocol';
+import type { Piece } from './store';
 
-const LOREM =
-  'Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.';
-
-export function shimCompletion(): string {
-  return [LOREM, LOREM, LOREM].join(' ');
-}
+/* The model: a small chat model running in this browser (see model/). */
 
 export interface StreamHandle {
   cancel(): void;
 }
 
-/** Streams the shim completion a few words at a time. */
-export function streamCompletion(
-  _context: string,
-  onChunk: (chunk: string) => void,
-  onDone: () => void,
-  opts: { leadingSpace?: boolean } = {},
-): StreamHandle {
-  const text = (opts.leadingSpace ? ' ' : '') + shimCompletion();
-  const pieces = text.match(/\s*\S+/g) ?? [];
-  let i = 0;
-  const timer = window.setInterval(() => {
-    const chunk = pieces.slice(i, i + 2).join('');
-    i += 2;
-    if (chunk) onChunk(chunk);
-    if (i >= pieces.length) {
-      window.clearInterval(timer);
-      onDone();
-    }
-  }, 35);
-  return { cancel: () => window.clearInterval(timer) };
+/**
+ * The conversation as chat turns, merged the way the chat shows it (one bubble = one turn): one
+ * voice never has two turns in a row, so a piece in the voice of the turn before it carries that
+ * turn on, with nothing in between. A piece with no words is no turn, except the last: that is
+ * where the model writes.
+ */
+export function turnsOf(pieces: Pick<Piece, 'role' | 'text'>[]): ChatTurn[] {
+  const turns: ChatTurn[] = [];
+  pieces.forEach((p, i) => {
+    if (!p.text && i < pieces.length - 1) return;
+    const role = p.role === 'model' ? 'assistant' : 'user';
+    const last = turns[turns.length - 1];
+    if (last && last.role === role) last.content += p.text;
+    else turns.push({ role, content: p.text });
+  });
+  return turns;
+}
+
+/**
+ * Streams the model's continuation of the last piece. Its turn is left open, so an empty model
+ * message becomes a reply and a half-written message (yours or the model's) is carried on.
+ */
+export function streamCompletion(pieces: Piece[], onChunk: (chunk: string) => void, onDone: (failed: boolean) => void): StreamHandle {
+  return generate(turnsOf(pieces), onChunk, onDone);
 }

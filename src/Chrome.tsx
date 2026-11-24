@@ -1,3 +1,4 @@
+import { ModelPill } from './model/ModelPill';
 import { useLoom } from './store';
 import { TITLE_EYES, TITLE_INK, TITLE_SLASH, TITLE_VIEWBOX } from './mindscapesTitle';
 
@@ -51,13 +52,14 @@ export function ChromeLeft() {
   );
 }
 
-/** Top right of the canvas: undo and redo. */
+/** Top right of the canvas: the model, then undo and redo. */
 export function ChromeRight() {
   const canUndo = useLoom((s) => s.past.length > 0);
   const canRedo = useLoom((s) => s.future.length > 0);
   const L = useLoom.getState();
   return (
     <div className="chrome chrome-right">
+      <ModelPill />
       <button className="icon-btn big" onClick={() => L.undo()} disabled={!canUndo} title="Undo (ctrl z)" aria-label="Undo">
         <svg viewBox="0 0 20 20" width="17" height="17" aria-hidden="true">
           <path d="M7 5 3 9l4 4M3.5 9H12a4.5 4.5 0 0 1 0 9H9" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" />

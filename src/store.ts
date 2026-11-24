@@ -11,6 +11,8 @@ import { streamCompletion, type StreamHandle } from './generate';
  */
 
 export type Role = 'user' | 'model';
+/** the other voice of the two */
+export const otherRole = (r: Role): Role => (r === 'model' ? 'user' : 'model');
 
 export interface Message {
   role: Role;
@@ -109,8 +111,10 @@ const widthOf = (n: LoomNode) => (n.isRoot ? ROOT_W : NODE_W);
 let idSeq = 0;
 const uid = (p: string) => `${p}${Date.now().toString(36)}${(idSeq++).toString(36)}`;
 
-/** live generations, keyed `${nodeId}:${msgIndex}` */
+/** live generations, keyed `${nodeId}:${msgIndex}`, oldest first: the model writes one at a time, the rest wait their turn */
 const streams = new Map<string, StreamHandle>();
+/** the message each live generation writes into; a node split above it moves it (see splitNode) */
+const targets = new Map<string, { id: string; msg: number }>();
 const streamKey = (id: string, msg: number) => `${id}:${msg}`;
 
 type Nodes = Record<string, LoomNode>;
@@ -142,6 +146,8 @@ export interface LoomState {
   tabCounter: number;
   colorCounter: number;
   focusRequest: { tabId: string; n: number } | null;
+  /** the keys of the live generations, oldest first: the first is being written, the others wait */
+  streamOrder: string[];
   toast: { text: string; n: number } | null;
   past: Snapshot[];
   future: Snapshot[];
@@ -156,14 +162,18 @@ export interface LoomState {
   forkMany(nodeId: string, count: number): void;
   /** new empty leaf child, opened in chat so you can type its first message */
   forkForWriting(nodeId: string, pos?: { x: number; y: number }): void;
-  forkAtToken(tabId: string, nodeId: string, msg: number, offset: number): void;
-  /** fork at a point and either let the model write ('generate') or leave it for you ('write') */
+  /** fork at a point and either let the model write the next message ('generate') or leave it for you ('write') */
   forkAtPoint(tabId: string, nodeId: string, msg: number, offset: number, kind: 'generate' | 'write', count?: number): void;
-  sendMessage(tabId: string, text: string): void;
-  /** add an empty message of a role (a ‹u› / ‹as› token) at the end of a chat */
-  insertToken(tabId: string, role: Role): void;
-  /** let the model carry on the chat's last message from where it stops */
-  completeHere(tabId: string): void;
+  /**
+   * Add what you typed to the end of a chat, in a voice. Two messages in one voice never follow
+   * each other: the text joins the last message when that one is in the same voice. `auto`: the
+   * model then answers in the other voice.
+   */
+  sendMessage(tabId: string, text: string, role?: Role, auto?: boolean): void;
+  /** let the model write at the end of a chat in a voice: it carries the last message on when that is in this voice, else it starts the next one */
+  promptModel(tabId: string, role: Role): void;
+  /** stop what the model is writing (or waiting to write) in a chat; the words so far stay */
+  stopGenerating(tabId: string): void;
   deleteSubtree(id: string): void;
   hideNode(id: string): void;
   showAllBelow(id: string): void;
@@ -180,7 +190,6 @@ export interface LoomState {
   openNodeIn(id: string, where: 'tab' | 'window'): void;
   newTab(): void;
   closeTab(id: string): void;
-  closeOtherTabs(id: string): void;
   closeTabsToRight(id: string): void;
   closeWindow(id: string): void;
   /** move a tab to a position in a window, or into a new window of its own */
@@ -245,6 +254,21 @@ export function piecesFor(nodes: Nodes, headId: string): Piece[] {
     }
   }
   return out;
+}
+
+/** The voice of the last words of the conversation you see when standing in `headId` (null: nothing is written yet). */
+export function lastVoice(nodes: Nodes, headId: string): Role | null {
+  let n: LoomNode | undefined = nodes[headId];
+  let upto = Infinity;
+  while (n) {
+    for (let k = Math.min(upto, n.messages.length - 1); k >= 0; k--) if (n.messages[k].text || n.messages[k].generating) return n.messages[k].role;
+    const f: ForkAt | null = n.forkAt;
+    if (!n.parentId || !f) return null;
+    // the parent's text up to the cut: a cut at a message's very start leaves that message out
+    upto = f.offset > 0 ? f.msg : f.msg - 1;
+    n = nodes[n.parentId];
+  }
+  return null;
 }
 
 /** The first word a node adds of its own: where it diverges from its parent. Used as the tab label. */
@@ -371,46 +395,12 @@ function tidyPositions(nodes: Nodes, children: Kids, rootId: string): Nodes {
 
 // ---------- seed ----------
 
-const LOREM =
-  'Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua.';
-const LOREM3 = [LOREM, LOREM, LOREM].join(' ');
-
+/** A fresh loom: the root and one empty chat, waiting for your first message. */
 function seed() {
-  const nodes: Nodes = {};
-  const children: Kids = {};
-  const add = (id: string, parentId: string | null, forkAt: ForkAt | null, messages: Message[]) => {
-    nodes[id] = { id, parentId, forkAt, messages, x: 0, y: 0, hidden: false, isRoot: parentId === null || undefined };
-    children[id] = [];
-    if (parentId) children[parentId].push(id);
-  };
-  const cut = LOREM3.indexOf('consectetur');
-  add('root', null, null, []);
-  add('a', 'root', null, [
-    { role: 'user', text: 'write me something about tide pools at night' },
-    { role: 'model', text: LOREM3 },
-    { role: 'user', text: 'keep going, but make it stranger' },
-    { role: 'model', text: LOREM3 },
-  ]);
-  // a fork part-way through the first model reply
-  add('b', 'a', { msg: 1, offset: cut }, [{ role: 'model', text: LOREM3.slice(cut) }]);
-  // a fork inside the first user message
-  add('c', 'a', { msg: 0, offset: 'write me something about '.length }, [
-    { role: 'user', text: 'the moon, in the voice of a crab' },
-    { role: 'model', text: LOREM3 },
-  ]);
-  add('d', 'root', null, [
-    { role: 'user', text: 'what does the moon want?' },
-    { role: 'model', text: LOREM3 },
-  ]);
-  const tabs: Tab[] = [
-    { id: 't1', name: '', headId: 'a', color: 0 },
-    { id: 't2', name: '', headId: 'b', color: 1 },
-    { id: 't3', name: '', headId: 'd', color: 2 },
-  ];
-  const windows: Win[] = [
-    { id: 'w1', tabIds: ['t1', 't3'], activeTabId: 't1', width: WIN_W, color: 0 },
-    { id: 'w2', tabIds: ['t2'], activeTabId: 't2', width: 280, color: 1 },
-  ];
+  const nodes: Nodes = { root: { id: 'root', parentId: null, forkAt: null, messages: [], x: 0, y: 0, hidden: false, isRoot: true } };
+  const children: Kids = { root: [] };
+  const tabs: Tab[] = [{ id: 't1', name: '', headId: 'root', color: 0 }];
+  const windows: Win[] = [{ id: 'w1', tabIds: ['t1'], activeTabId: 't1', width: WIN_W, color: 0 }];
   return {
     nodes: tidyPositions(nodes, children, 'root'),
     children,
@@ -420,15 +410,15 @@ function seed() {
     activeWindowId: 'w1' as string | null,
     activeTabId: 't1' as string | null,
     sidebarFolded: false,
-    tabCounter: 3,
-    colorCounter: 3,
+    tabCounter: 1,
+    colorCounter: 1,
   };
 }
 
 // ---------- persistence ----------
 
-const SAVE_KEY = 'mindscapes-loom-v3';
-const OLD_SAVE_KEY = 'mindscapes-loom-v2';
+const SAVE_KEY = 'mindscapes-loom-interview-v1'; // its own: this fork shares a site with the loom
+const OLD_SAVE_KEY = 'mindscapes-loom-interview-v0'; // never written: the loom's old saves are not ours to read
 type Saved = ReturnType<typeof seed>;
 
 function load(): Saved | null {
@@ -450,7 +440,12 @@ function load(): Saved | null {
       const activeWindowId = windows.find((w) => w.tabIds.includes(o.activeTabId ?? ''))?.id ?? windows[0]?.id ?? null;
       s = { ...o, tabs, windows, activeWindowId };
     }
-    for (const n of Object.values(s.nodes)) for (const m of n.messages) m.generating = false;
+    for (const n of Object.values(s.nodes)) {
+      // a reply the model had not begun when the page closed (it can take minutes to load) would
+      // come back as an empty message waiting for your words in the model's voice: drop it
+      n.messages = n.messages.filter((m) => !(m.generating && !m.text));
+      for (const m of n.messages) m.generating = false;
+    }
     return s;
   } catch {
     return null;
@@ -498,6 +493,12 @@ function settleWindows(tabs: Tab[], windows: Win[], activeWindowId: string | nul
 export const useLoom = create<LoomState>()((set, get) => {
   const bump = () => get().structure + 1;
 
+  const dropStream = (key: string) => {
+    streams.delete(key);
+    targets.delete(key);
+  };
+  const syncOrder = () => set({ streamOrder: [...streams.keys()] });
+
   const snap = (): Snapshot => {
     const s = get();
     return { nodes: s.nodes, children: s.children, tabs: s.tabs, windows: s.windows, activeWindowId: s.activeWindowId };
@@ -524,9 +525,10 @@ export const useLoom = create<LoomState>()((set, get) => {
       const [id, i] = key.split(':');
       if (!nodes[id]?.messages[Number(i)]) {
         h.cancel();
-        streams.delete(key);
+        dropStream(key);
       }
     }
+    syncOrder();
     // the snapshot's tabs and windows, keeping any renames made since
     const now = new Map(get().tabs.map((t) => [t.id, t]));
     const tabs = sn.tabs.map((t) => ({ ...t, name: now.get(t.id)?.name ?? t.name, headId: nodes[t.headId] ? t.headId : get().rootId }));
@@ -543,24 +545,28 @@ export const useLoom = create<LoomState>()((set, get) => {
       return { nodes: { ...s.nodes, [id]: { ...n, messages } } };
     });
 
-  /** Stream a model message into nodes[id].messages[msg]. */
+  /** A generation is over (finished, failed or stopped). A message that never got a word is taken back: no message is empty. */
+  const endStream = (at: { id: string; msg: number }) => {
+    dropStream(streamKey(at.id, at.msg));
+    const node = get().nodes[at.id];
+    const m = node?.messages[at.msg];
+    if (node && m && !m.text && at.msg === node.messages.length - 1)
+      set((st) => ({ nodes: { ...st.nodes, [at.id]: { ...node, messages: node.messages.slice(0, -1) } }, structure: st.structure + 1 }));
+    else patchMessage(at.id, at.msg, (x) => ({ ...x, generating: false }));
+    syncOrder();
+  };
+
+  /** Stream the model's words into nodes[id].messages[msg]. What it reads is fixed now, also when it has to wait its turn. */
   const startStream = (id: string, msg: number) => {
-    const pieces = piecesFor(get().nodes, id);
-    const own = get().nodes[id]?.messages[msg];
-    // carrying on text already in this message: a space unless it already ends in one
-    const prev = own && own.text ? { role: own.role, text: own.text } : pieces[pieces.length - 2]; // else the piece before the (empty) message
-    const leadingSpace = !!prev && (own?.text ? true : prev.role === 'model') && prev.text.length > 0 && !/\s$/.test(prev.text);
-    const key = streamKey(id, msg);
+    const at = { id, msg };
     const h = streamCompletion(
-      contextOf(get().nodes, id),
-      (chunk) => patchMessage(id, msg, (m) => (m.generating ? { ...m, text: m.text + chunk } : m)),
-      () => {
-        streams.delete(key);
-        patchMessage(id, msg, (m) => ({ ...m, generating: false }));
-      },
-      { leadingSpace },
+      piecesFor(get().nodes, id),
+      (chunk) => patchMessage(at.id, at.msg, (m) => (m.generating ? { ...m, text: m.text + chunk } : m)),
+      () => endStream(at),
     );
-    streams.set(key, h);
+    streams.set(streamKey(id, msg), h);
+    targets.set(streamKey(id, msg), at);
+    syncOrder();
   };
 
   const addChild = (parentId: string, forkAt: ForkAt | null, messages: Message[], pos?: { x: number; y: number }) => {
@@ -620,7 +626,22 @@ export const useLoom = create<LoomState>()((set, get) => {
     const children = { ...s.children, [id]: [sufId, ...keep], [sufId]: move };
     // a chat standing on the whole node keeps seeing the whole text
     const tabs = s.tabs.map((t) => (t.headId === id ? { ...t, headId: sufId } : t));
-    set({ nodes, children, tabs, structure: s.structure + 1 });
+    // a message still being written in the part that moved keeps getting its words
+    const live = [...streams].map(([key, h]) => {
+      const at = targets.get(key)!;
+      if (at.id === id && (at.msg > msg || (at.msg === msg && partial))) {
+        at.id = sufId;
+        at.msg -= msg + (partial ? 0 : 1);
+      }
+      return [streamKey(at.id, at.msg), h, at] as const;
+    });
+    streams.clear();
+    targets.clear();
+    for (const [key, h, at] of live) {
+      streams.set(key, h);
+      targets.set(key, at);
+    }
+    set({ nodes, children, tabs, structure: s.structure + 1, streamOrder: [...streams.keys()] });
     return sufId;
   };
 
@@ -680,6 +701,7 @@ export const useLoom = create<LoomState>()((set, get) => {
   return {
     ...initial,
     structure: 0,
+    streamOrder: [],
     focusRequest: null,
     toast: null,
     past: [],
@@ -735,21 +757,16 @@ export const useLoom = create<LoomState>()((set, get) => {
       get().openInChat(id, true);
     },
 
-    forkAtToken(tabId, nodeId, msg, offset) {
-      const m = get().nodes[nodeId]?.messages[msg];
-      if (!m) return;
-      // model text: the model writes on from here. user text: keep the words before, you write the rest.
-      get().forkAtPoint(tabId, nodeId, msg, offset, m.role === 'model' ? 'generate' : 'write');
-    },
-
     forkAtPoint(tabId, nodeId, msg, offset, kind, count = 1) {
       const N = get().nodes[nodeId];
       if (!N?.messages[msg]) return;
-      if (N.messages.some((m) => m.generating)) {
-        get().showToast('Wait for this node to finish writing before forking inside it');
+      if (N.messages[msg].generating) {
+        get().showToast('Wait for this message to finish (or stop it) before forking after it');
         return;
       }
       get().commit();
+      // the model writes the next message: the other voice to the one the fork comes after
+      let voice = otherRole(N.messages[msg].role);
       let parent = nodeId;
       let at: ForkAt | null;
       const len = N.messages[msg].text.length;
@@ -758,6 +775,8 @@ export const useLoom = create<LoomState>()((set, get) => {
         // forking at the node's first token: a sibling, cut from the parent where this node is
         parent = N.parentId;
         at = N.forkAt;
+        // another take on this node's first message, in its voice
+        voice = N.messages[0].role;
       } else if (atEnd) {
         at = endOf(N);
       } else {
@@ -765,14 +784,15 @@ export const useLoom = create<LoomState>()((set, get) => {
         // and the old continuation and the new fork are its two children
         splitNode(nodeId, msg, offset);
         at = endOf(get().nodes[nodeId]);
+        // from a word the model carries on (its own message, or its answer to yours cut there);
+        // from a message's first word it is another take on that message, in its voice
+        voice = offset > 0 ? 'model' : N.messages[msg].role;
       }
-      // the model never speaks first: a fork straight off the root is always yours to write
-      if (get().nodes[parent]?.isRoot) kind = 'write';
       let id = '';
       for (let i = 0; i < (kind === 'generate' ? count : 1); i++) {
         id =
           kind === 'generate'
-            ? addChild(parent, at, [{ role: 'model', text: '', generating: true }])
+            ? addChild(parent, at, [{ role: voice, text: '', generating: true }])
             : addChild(parent, at, []);
         if (kind === 'generate') startStream(id, 0);
       }
@@ -780,36 +800,37 @@ export const useLoom = create<LoomState>()((set, get) => {
       if (kind === 'write') set({ focusRequest: { tabId, n: Date.now() } });
     },
 
-    sendMessage(tabId, text) {
+    sendMessage(tabId, text, role = 'user', auto = true) {
       const s = get();
       const tab = s.tabs.find((t) => t.id === tabId);
       const body = text.trim();
       if (!tab || !body) return;
       const head = s.nodes[tab.headId] ?? s.nodes[s.rootId];
+      if (head.messages.some((m) => m.generating)) return;
       s.commit();
+      const reply: Message[] = auto ? [{ role: otherRole(role), text: '', generating: true }] : [];
+      let id = head.id;
       if (head.isRoot) {
         // the root holds no text: the first message starts a new node under it
-        const id = addChild(head.id, null, [
-          { role: 'user', text: body },
-          { role: 'model', text: '', generating: true },
-        ]);
-        setHead(tabId, id);
-        startStream(id, 1);
-        return;
+        id = addChild(head.id, null, [{ role, text: body }, ...reply]);
+      } else {
+        // (an empty last message is a leftover of the old ‹u› / ‹as› tokens: dropped)
+        const tail = head.messages[head.messages.length - 1];
+        const base = tail && !tail.text ? head.messages.slice(0, -1) : head.messages;
+        const last = base[base.length - 1];
+        // the text this follows: the node's last message, or in a new branch the message it was cut from
+        const before = last ?? piecesFor(s.nodes, head.id).pop();
+        // one voice never has two messages in a row: the same voice again joins the message before, on a new line
+        const joins = before?.role === role;
+        const sep = joins && before.text && !/\s$/.test(before.text) ? '\n' : '';
+        const written: Message[] = last && joins ? [...base.slice(0, -1), { ...last, text: last.text + sep + body }] : [...base, { role, text: sep + body }];
+        set((st) => ({ nodes: { ...st.nodes, [head.id]: { ...head, messages: [...written, ...reply] } }, structure: st.structure + 1 }));
       }
-      // an open token (an empty message you inserted) takes what you typed, in its role;
-      // the model only replies on its own after a user message
-      const last = head.messages[head.messages.length - 1];
-      const open = !!last && !last.text && !last.generating;
-      const written: Message[] = open ? [...head.messages.slice(0, -1), { ...last, text: body }] : [...head.messages, { role: 'user', text: body }];
-      const role = open ? last.role : 'user';
-      const messages: Message[] = role === 'user' ? [...written, { role: 'model', text: '', generating: true }] : written;
-      set((st) => ({ nodes: { ...st.nodes, [head.id]: { ...head, messages } }, structure: st.structure + 1 }));
-      setHead(tabId, head.id);
-      if (role === 'user') startStream(head.id, messages.length - 1);
+      setHead(tabId, id);
+      if (auto) startStream(id, get().nodes[id].messages.length - 1);
     },
 
-    insertToken(tabId, role) {
+    promptModel(tabId, role) {
       const s = get();
       const tab = s.tabs.find((t) => t.id === tabId);
       if (!tab) return;
@@ -817,28 +838,30 @@ export const useLoom = create<LoomState>()((set, get) => {
       if (head.messages.some((m) => m.generating)) return;
       s.commit();
       if (head.isRoot) {
-        const id = addChild(head.id, null, [{ role, text: '' }]);
+        const id = addChild(head.id, null, [{ role, text: '', generating: true }]);
         setHead(tabId, id);
-      } else {
-        const last = head.messages[head.messages.length - 1];
-        // an empty token straight after another just swaps it, rather than stacking empty messages
-        const base = last && !last.text ? head.messages.slice(0, -1) : head.messages;
-        set((st) => ({ nodes: { ...st.nodes, [head.id]: { ...head, messages: [...base, { role, text: '' }] } }, structure: st.structure + 1 }));
-        setHead(tabId, head.id);
+        startStream(id, 0);
+        return;
       }
-      set({ focusRequest: { tabId, n: Date.now() } });
+      const i = head.messages.length - 1;
+      // an empty branch gets its first message; in the voice of the message it was cut from, that one is carried on
+      const messages: Message[] =
+        i >= 0 && head.messages[i].role === role
+          ? head.messages.map((m, k) => (k === i ? { ...m, generating: true } : m))
+          : [...head.messages, { role, text: '', generating: true }];
+      set((st) => ({ nodes: { ...st.nodes, [head.id]: { ...head, messages } }, structure: st.structure + 1 }));
+      startStream(head.id, messages.length - 1);
     },
 
-    completeHere(tabId) {
+    stopGenerating(tabId) {
       const s = get();
       const tab = s.tabs.find((t) => t.id === tabId);
-      const head = tab ? s.nodes[tab.headId] : undefined;
-      if (!tab || !head || head.isRoot || !head.messages.length || head.messages.some((m) => m.generating)) return;
-      s.commit();
-      const i = head.messages.length - 1;
-      const messages = head.messages.map((m, k) => (k === i ? { ...m, generating: true } : m));
-      set((st) => ({ nodes: { ...st.nodes, [head.id]: { ...head, messages } }, structure: st.structure + 1 }));
-      startStream(head.id, i);
+      if (!tab) return;
+      for (const p of piecesFor(s.nodes, tab.headId)) {
+        if (!p.generating) continue;
+        streams.get(streamKey(p.nodeId, p.msg))?.cancel();
+        endStream({ id: p.nodeId, msg: p.msg });
+      }
     },
 
     deleteSubtree(id) {
@@ -855,9 +878,10 @@ export const useLoom = create<LoomState>()((set, get) => {
       for (const [key, h] of streams) {
         if (gone.has(key.split(':')[0])) {
           h.cancel();
-          streams.delete(key);
+          dropStream(key);
         }
       }
+      syncOrder();
       // chats that were on a deleted node close with it
       const tabs = s.tabs.filter((t) => !gone.has(t.headId));
       set({ nodes, children, ...settleWindows(tabs, s.windows, s.activeWindowId), structure: bump() });
@@ -911,9 +935,10 @@ export const useLoom = create<LoomState>()((set, get) => {
       for (const [key, h] of streams) {
         if (gone.has(key.split(':')[0])) {
           h.cancel();
-          streams.delete(key);
+          dropStream(key);
         }
       }
+      syncOrder();
       const tabs = s.tabs.filter((t) => !gone.has(t.headId));
       set({ nodes, children, ...settleWindows(tabs, s.windows, s.activeWindowId), structure: bump() });
     },
@@ -979,15 +1004,6 @@ export const useLoom = create<LoomState>()((set, get) => {
         return { ...w, tabIds, activeTabId: next };
       });
       applyTabs(s.tabs.filter((t) => t.id !== id), windows, s.activeWindowId);
-    },
-
-    closeOtherTabs(id) {
-      const s = get();
-      const w = s.windows.find((x) => x.tabIds.includes(id));
-      if (!w) return;
-      const drop = new Set(w.tabIds.filter((t) => t !== id));
-      const windows = s.windows.map((x) => (x.id === w.id ? { ...x, tabIds: [id], activeTabId: id } : x));
-      applyTabs(s.tabs.filter((t) => !drop.has(t.id)), windows, w.id);
     },
 
     closeTabsToRight(id) {
@@ -1072,12 +1088,13 @@ export const useLoom = create<LoomState>()((set, get) => {
     reset() {
       for (const h of streams.values()) h.cancel();
       streams.clear();
+      targets.clear();
       try {
         localStorage.removeItem(SAVE_KEY);
       } catch {
         /* storage unavailable */
       }
-      set({ ...seed(), past: [], future: [], structure: get().structure + 1 });
+      set({ ...seed(), past: [], future: [], streamOrder: [], structure: get().structure + 1 });
     },
   };
 });
@@ -1158,7 +1175,8 @@ export function exportMarkdown(nodes: Nodes, id: string): string {
   return out.join('\n');
 }
 
-// with ?debug in the URL, expose the UI store for automated checks
+// with ?debug in the URL, expose the stores for automated checks
 if (typeof window !== 'undefined' && window.location.search.includes('debug')) {
   (window as unknown as { __loomUi: typeof useUi }).__loomUi = useUi;
+  (window as unknown as { __loom: typeof useLoom }).__loom = useLoom;
 }

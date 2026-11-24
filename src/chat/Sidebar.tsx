@@ -1,27 +1,27 @@
-import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
-import { MAX_WINDOWS, colorOf, divergingToken, pathTo, piecesFor, useLoom, useUi, type Piece, type Role, type Tab, type Win } from '../store';
+import { Fragment, memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from 'react';
+import { MAX_WINDOWS, colorOf, divergingToken, lastVoice, pathTo, piecesFor, useLoom, useUi, type Role, type Tab, type Win } from '../store';
 import { useIsMobile } from '../useIsMobile';
 import { tokenize } from '../text';
 import { SidebarToggle } from '../Chrome';
 import { TOOLTIP_DELAY_MS, TOOLTIP_GAP, useNearCursor } from '../floating';
 import { Flyout } from '../Flyout';
+import { forkMarks, markKey, type Branch, type Bubble } from './forkMarks';
+import { useChatPrefs, voiceFor, type TypeAs } from './prefs';
+import robotLines from '../assets/robot-lines.png';
 
 const MIN_W = 240;
+/** the chat options menu's width (.chat-menu) */
+const CHAT_MENU_W = 276;
 const MAX_W = 720;
 
-interface Bubble {
-  role: Role;
-  pieces: Piece[];
-}
-
-/** branch counts by `${nodeId}:${msg}:${offset}` for every node on the path */
+/** how many other branches split at a point of the chat, by `markKey` (see forkMarks) */
 type ForkCounts = Map<string, number>;
 
 /**
- * The conversation as bubbles. One bubble is one message. A piece joins the previous bubble when it
- * carries on the same message: the previous piece was cut off part-way (a fork), or this piece is
- * the first message of a child node in the same voice (a node split mid-message, or a branch that
- * continues the text). Two whole messages of one node are never merged.
+ * The conversation as bubbles. One bubble is everything one voice says before the other speaks:
+ * pieces in the same voice always join, whatever nodes they sit in, so no voice ever has two
+ * bubbles in a row (the model reads it the same way, see turnsOf). A message with no words is not
+ * drawn, unless the model is about to write it.
  */
 function useConversation(headId: string) {
   const nodes = useLoom((s) => s.nodes);
@@ -29,91 +29,88 @@ function useConversation(headId: string) {
   return useMemo(() => {
     const bubbles: Bubble[] = [];
     for (const p of piecesFor(nodes, headId)) {
+      if (!p.text && !p.generating) continue;
       const last = bubbles[bubbles.length - 1];
-      const prev = last?.pieces[last.pieces.length - 1];
-      const continues = !!prev && (!prev.whole || (p.nodeId !== prev.nodeId && p.msg === 0));
-      if (last && last.role === p.role && continues) last.pieces.push(p);
+      if (last && last.role === p.role) last.pieces.push(p);
       else bubbles.push({ role: p.role, pieces: [p] });
     }
-    const forks: ForkCounts = new Map();
-    const forkKids = new Map<string, string[]>();
-    for (const n of pathTo(nodes, headId)) {
-      for (const c of children[n.id] ?? []) {
-        const f = nodes[c]?.forkAt;
-        if (!f) continue;
-        const key = `${n.id}:${f.msg}:${f.offset}`;
-        forks.set(key, (forks.get(key) ?? 0) + 1);
-        forkKids.set(key, [...(forkKids.get(key) ?? []), c]);
-      }
-    }
-    // a node on the path whose parent forks at the same point has alternatives at its first token
-    for (const n of pathTo(nodes, headId)) {
-      if (!n.parentId || n.isRoot) continue;
-      const sibs = (children[n.parentId] ?? []).filter((c) => {
-        const a = nodes[c]?.forkAt;
-        const b = n.forkAt;
-        return c !== n.id && (a === b || (!!a && !!b && a.msg === b.msg && a.offset === b.offset));
-      });
-      if (!sibs.length) continue;
-      const key = `${n.id}:0:0`;
-      forks.set(key, (forks.get(key) ?? 0) + sibs.length);
-      forkKids.set(key, [...(forkKids.get(key) ?? []), ...sibs]);
-    }
-    const onPath = new Set(pathTo(nodes, headId).map((n) => n.id));
-    // the last message carries on into branches in the same voice: it hasn't ended
-    const head = nodes[headId];
-    const lastMsg = head?.messages[head.messages.length - 1];
-    const endContinues =
-      !!head &&
-      !!lastMsg &&
-      (children[head.id] ?? []).some((c) => {
-        const f = nodes[c]?.forkAt;
-        return !!f && f.msg === head.messages.length - 1 && f.offset >= lastMsg.text.length && nodes[c].messages[0]?.role === lastMsg.role;
-      });
-    return { bubbles, forks, forkKids, onPath, endContinues };
+    const { counts: forks, kids: forkKids } = forkMarks(pathTo(nodes, headId), nodes, children, bubbles);
+    return { bubbles, forks, forkKids };
   }, [nodes, children, headId]);
 }
 
-/* The ‹u› / ‹as› tags are real points in the text: the start of a message (top) and its end (bottom). */
-function ForkTag({ bubble, edge, forks }: { bubble: Bubble; edge: 'top' | 'bottom'; forks: ForkCounts }) {
-  const tag = bubble.role === 'model' ? 'as' : 'u';
-  const piece = edge === 'top' ? bubble.pieces[0] : bubble.pieces[bubble.pieces.length - 1];
-  const offset = edge === 'top' ? 0 : piece.text.length;
-  const tip = 'click for forks at this token';
-  const branches = forks.get(`${piece.nodeId}:${piece.msg}:${offset}`) ?? 0;
+/** A place in the tree that the chat can fork at. */
+interface TreePoint {
+  nodeId: string;
+  msg: number;
+  offset: number;
+}
+
+/**
+ * The space between two bubbles (and above the first, below the last) is a point of the text:
+ * a thin line shows there under the mouse, and a click opens the fork menu. The line stays, with
+ * a count, where other branches already part. `quiet`: those branches are listed right there (the
+ * tree under the chat's last message), so the line is not lit for them a second time.
+ */
+function Gap({ at, top, branches, quiet }: { at: TreePoint; top?: boolean; branches: number; quiet?: boolean }) {
+  const lit = branches > 0 && !quiet;
   return (
     <button
       type="button"
-      className={`tag ${edge}${branches ? ' loomed' : ''}`}
-      data-n={piece.nodeId}
-      data-m={piece.msg}
-      data-o={offset}
-      data-tip={tip}
+      className={`gap${lit ? ' loomed' : ''}`}
+      data-n={at.nodeId}
+      data-m={at.msg}
+      data-o={at.offset}
+      data-top={top || undefined}
       data-b={branches || undefined}
-      aria-label={tip}
+      data-tip="click to fork here"
+      aria-label={`fork here${branches ? ` (${branches} branch${branches > 1 ? 'es' : ''} already split here)` : ''}`}
     >
-      ‹{tag}›
+      {lit && <span className="gap-n">{branches}</span>}
     </button>
   );
 }
 
-/** The message has really ended: its last piece is the whole message, has text (an empty one is an
- *  open token, still to be written) and nothing is still being written. */
-const bubbleEnded = (b: Bubble) => {
-  const last = b.pieces[b.pieces.length - 1];
-  return last.whole && !last.generating && last.text.length > 0;
-};
+/**
+ * The robot with a speech bubble: the model writes here, in this voice. The assistant's are on the
+ * left of the chat and the user's on the right, like the bubbles. It always takes its room and is
+ * only shown while the mouse is over its side of the chat (see .msgs[data-side]; 70% to the voice that spoke last), so nothing
+ * moves when it appears.
+ */
+function RobotButton({ tabId, voice, off }: { tabId: string; voice: Role; off: boolean }) {
+  const tip = `click to start model response as the ${voice === 'model' ? 'assistant' : 'user'}`;
+  return (
+    <button
+      type="button"
+      className={`robot-btn ${voice === 'model' ? 'left' : 'right'}`}
+      data-voice={voice}
+      data-tip={tip}
+      aria-label={tip}
+      disabled={off}
+      onClick={(e) => {
+        e.stopPropagation();
+        useLoom.getState().promptModel(tabId, voice);
+      }}
+    >
+      <span className="robot-ico" style={{ maskImage: `url(${robotLines})`, WebkitMaskImage: `url(${robotLines})` }} />
+      {/* drawn as thin as the robot's own lines */}
+      <svg className="robot-says" viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+        <path d="M2.5 3.5h11v7h-6l-3 2.5v-2.5h-2z" fill="none" stroke="currentColor" strokeWidth="0.9" strokeLinejoin="round" />
+      </svg>
+    </button>
+  );
+}
 
-const BubbleView = memo(function BubbleView({ bubble, forks, continues }: { bubble: Bubble; forks: ForkCounts; continues?: boolean }) {
+const BubbleView = memo(function BubbleView({ bubble, forks, waiting, tail }: { bubble: Bubble; forks: ForkCounts; waiting?: boolean; tail?: ReactNode }) {
   const generating = bubble.pieces.some((p) => p.generating);
   return (
-    <div className={`bubble ${bubble.role}${bubble.pieces.every((p) => !p.text) && !generating ? ' open-token' : ''}`}>
-      <ForkTag bubble={bubble} edge="top" forks={forks} />
+    <div className={`bubble ${bubble.role}`}>
       <p>
         {bubble.pieces.map((p) => {
           const base = `${p.nodeId}:${p.msg}:`;
           return tokenize(p.text).map((tok) => {
             if (tok.space) return tok.text;
+            // a word is lit where another branch parts in the middle of a message
             const n = forks.get(base + tok.offset) ?? 0;
             return (
               <span
@@ -129,9 +126,9 @@ const BubbleView = memo(function BubbleView({ bubble, forks, continues }: { bubb
             );
           });
         })}
-        {generating && <span className="caret" aria-hidden="true" />}
+        {generating && (waiting ? <span className="waiting">waiting for its turn…</span> : <span className="caret" aria-hidden="true" />)}
+        {tail}
       </p>
-      {bubbleEnded(bubble) && !continues && <ForkTag bubble={bubble} edge="bottom" forks={forks} />}
     </div>
   );
 });
@@ -227,12 +224,12 @@ function ForkTree({ kids, onPick }: { kids: string[]; onPick: (id: string) => vo
   );
 }
 
-function TokTip({ x, y, branches, text }: { x: number; y: number; branches: number; text?: string }) {
+function TokTip({ x, y, branches, text }: { x: number; y: number; branches: number; text: string }) {
   const ref = useRef<HTMLDivElement>(null);
   const { style } = useNearCursor(ref, x, y, TOOLTIP_GAP);
   return (
     <div className="tok-tip" style={style} ref={ref} role="tooltip">
-      {text ?? 'click for forks at this token'}
+      {text}
       {branches > 0 && (
         <span className="tok-tip-sub">
           {branches} branch{branches > 1 ? 'es' : ''} already split here
@@ -242,12 +239,11 @@ function TokTip({ x, y, branches, text }: { x: number; y: number; branches: numb
   );
 }
 
-/** The menu a clicked token opens: view the forks that already split here, or make a new one. */
-function TokenMenu({
+/** The menu a clicked word or gap opens: view the forks that already split there, or make a new one. */
+function ForkMenu({
   x,
   y,
   forks,
-  rootLevel,
   onClose,
   onFork,
   onPick,
@@ -255,11 +251,9 @@ function TokenMenu({
 }: {
   x: number;
   y: number;
-  forks: string[];
-  /** open the node this token belongs to in a new tab or window */
+  forks: Branch[];
+  /** open the node this point belongs to in a new tab or window */
   onOpen: (where: 'tab' | 'window') => void;
-  /** the fork would hang straight off the root, where only you can write */
-  rootLevel: boolean;
   onClose: () => void;
   onFork: (kind: 'generate' | 'write', count: number) => void;
   onPick: (nodeId: string) => void;
@@ -284,41 +278,43 @@ function TokenMenu({
     };
   }, [onClose]);
   const place = useNearCursor(ref, x, y);
-  const label = (id: string) => {
-    const t = (nodes[id]?.messages.map((m) => m.text).join(' ') ?? '').trim().split(/\s+/).slice(0, 6).join(' ');
-    return t ? `${t}…` : '(empty: you write it)';
+  const label = ({ id, from }: Branch) => {
+    const n = nodes[id];
+    const ms = n?.messages ?? [];
+    // a node's own text after the point: only what comes after it
+    const texts = from ? [ms[from.msg]?.text.slice(from.offset) ?? '', ...ms.slice(from.msg + 1).map((m) => m.text)] : ms.map((m) => m.text);
+    const t = texts.join(' ').trim().split(/\s+/).slice(0, 6).join(' ');
+    if (t) return `${t}…`;
+    return ms.some((m) => m.generating) ? '(the model is writing it)' : '(empty: you write it)';
   };
   const act = (fn: () => void) => () => {
     fn();
     onClose();
   };
+  const list = forks.map((b) => (
+    <button key={`${b.id}${b.from ? ':rest' : ''}`} role="menuitem" className="fork-pick" onClick={act(() => onPick(b.id))}>
+      {label(b)}
+    </button>
+  ));
   return (
     <div className={`node-menu${place.subClass}`} style={place.style} ref={ref} role="menu" onClick={(e) => e.stopPropagation()}>
       <div className="has-sub" ref={viewRow} onPointerEnter={(e) => e.pointerType === 'mouse' && forks.length && setSub('view')} onPointerLeave={(e) => e.pointerType === 'mouse' && setSub(null)}>
         <button role="menuitem" disabled={!forks.length} aria-haspopup="menu" onClick={() => forks.length && setSub('view')}>
-          view forks at this token <span className="chev">›</span>
+          view forks here <span className="chev">›</span>
         </button>
-        {sub === 'view' && forks.length > 0 && (
-          <Flyout anchor={viewRow}>
-            {forks.map((id) => (
-              <button key={id} role="menuitem" onClick={act(() => onPick(id))}>
-                {label(id)}
-              </button>
-            ))}
-          </Flyout>
-        )}
+        {sub === 'view' && forks.length > 0 && <Flyout anchor={viewRow}>{list}</Flyout>}
       </div>
-      {/* the same choices as "fork from here" on a canvas node, made at this token */}
+      {/* the same choices as "fork from here" on a canvas node, made at this point */}
       <div className="has-sub" ref={newRow} onPointerEnter={(e) => e.pointerType === 'mouse' && setSub('new')} onPointerLeave={(e) => e.pointerType === 'mouse' && setSub(null)}>
         <button role="menuitem" aria-haspopup="menu" onClick={() => setSub('new')}>
-          new fork at this token <span className="chev">›</span>
+          new fork here <span className="chev">›</span>
         </button>
         {sub === 'new' && (
           <Flyout anchor={newRow}>
-            <button role="menuitem" disabled={rootLevel} onClick={act(() => onFork('generate', 1))}>
+            <button role="menuitem" onClick={act(() => onFork('generate', 1))}>
               generate 1 branch
             </button>
-            <button role="menuitem" disabled={rootLevel} onClick={act(() => onFork('generate', 3))}>
+            <button role="menuitem" onClick={act(() => onFork('generate', 3))}>
               generate 3 branches
             </button>
             <button role="menuitem" onClick={act(() => onFork('write', 1))}>
@@ -345,7 +341,7 @@ function TokenMenu({
 }
 
 function Messages({ tab }: { tab: Tab }) {
-  const { bubbles, forks, forkKids, endContinues } = useConversation(tab.headId);
+  const { bubbles, forks, forkKids } = useConversation(tab.headId);
   // only the branches that carry on from the very end of the conversation get the tree
   const endKids = useLoom((s) => {
     const head = s.nodes[tab.headId];
@@ -357,18 +353,18 @@ function Messages({ tab }: { tab: Tab }) {
     });
     return kids.length ? kids.join(',') : NO_KIDS;
   }).split(',').filter(Boolean);
+  // the model writes one message at a time: the others wait their turn
+  const writing = useLoom((s) => s.streamOrder[0]);
+  const busy = useLoom((s) => !!s.nodes[tab.headId]?.messages.some((m) => m.generating));
+  const auto = useChatPrefs((s) => s.autoPrompt);
   const menuOpenedAt = useRef(0);
-  const [menu, setMenu] = useState<{
-    x: number;
-    y: number;
-    nodeId: string;
-    msg: number;
-    offset: number;
-  } | null>(null);
+  const [menu, setMenu] = useState<(TreePoint & { x: number; y: number; top: boolean }) | null>(null);
   const forkAtPoint = useLoom((s) => s.forkAtPoint);
   const ref = useRef<HTMLDivElement>(null);
-  const [tip, setTip] = useState<{ x: number; y: number; branches: number; text?: string } | null>(null);
+  const [tip, setTip] = useState<{ x: number; y: number; branches: number; text: string } | null>(null);
   const stick = useRef(true);
+  /** where the chat last scrolled itself to: a scroll to there is not you looking around */
+  const autoTop = useRef(-1);
   const tipTimer = useRef<number>();
   const tipFor = useRef<HTMLElement | null>(null);
   const cursor = useRef({ x: 0, y: 0 });
@@ -377,20 +373,32 @@ function Messages({ tab }: { tab: Tab }) {
     window.clearTimeout(tipTimer.current);
     setTip(null);
   };
+  const toEnd = () => {
+    const el = ref.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    autoTop.current = el.scrollTop;
+  };
   const textLen = bubbles.reduce((a, b) => a + b.pieces.reduce((x, p) => x + p.text.length, 0), 0);
 
   useLayoutEffect(() => {
-    const el = ref.current;
-    if (el && stick.current) el.scrollTop = el.scrollHeight;
+    if (stick.current) toEnd();
   }, [textLen, bubbles.length]);
 
   useEffect(() => {
     stick.current = true;
-    const el = ref.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    toEnd();
   }, [tab.headId]);
 
-  const target = (e: React.SyntheticEvent) => (e.target as HTMLElement).closest<HTMLElement>('.tok, .tag');
+  // what can be clicked: any word, and the gaps between bubbles
+  const target = (e: React.SyntheticEvent) => (e.target as HTMLElement).closest<HTMLElement>('.gap, .tok');
+  const tipTarget = (e: React.SyntheticEvent) => (e.target as HTMLElement).closest<HTMLElement>('[data-tip], .tok');
+  const open = (e: React.MouseEvent, t: HTMLElement) => {
+    hideTip();
+    menuOpenedAt.current = performance.now();
+    setMenu({ x: e.clientX, y: e.clientY, nodeId: t.dataset.n!, msg: Number(t.dataset.m), offset: Number(t.dataset.o), top: !!t.dataset.top });
+  };
+  const lastRole = bubbles[bubbles.length - 1]?.role;
 
   return (
     <div
@@ -399,16 +407,25 @@ function Messages({ tab }: { tab: Tab }) {
       onScroll={(e) => {
         const el = e.currentTarget;
         stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+        // the chat following the text as it is written: menus and tips stay open
+        if (Math.abs(el.scrollTop - autoTop.current) < 2) return;
         hideTip();
         // only a scroll you make closes the menu, not one caused by the click that opened it
         if (performance.now() - menuOpenedAt.current > 300) setMenu(null);
       }}
       onMouseMove={(e) => {
         cursor.current = { x: e.clientX, y: e.clientY };
+        // which side of the chat the mouse is over: the robot buttons of that side show. The voice
+        // that spoke last has the wider side (70%): carrying its message on is the nearer thing to do
+        const el = e.currentTarget;
+        const r = el.getBoundingClientRect();
+        const split = lastRole === 'model' ? 0.7 : lastRole === 'user' ? 0.3 : 0.5;
+        const side = e.clientX < r.left + r.width * split ? 'left' : 'right';
+        if (el.dataset.side !== side) el.dataset.side = side;
       }}
       onMouseOver={(e) => {
         cursor.current = { x: e.clientX, y: e.clientY };
-        const t = target(e);
+        const t = tipTarget(e);
         if (!t) {
           tipFor.current = null;
           window.clearTimeout(tipTimer.current);
@@ -419,51 +436,60 @@ function Messages({ tab }: { tab: Tab }) {
         window.clearTimeout(tipTimer.current);
         setTip(null);
         tipTimer.current = window.setTimeout(() => {
-          setTip({ ...cursor.current, branches: Number(t.dataset.b ?? 0), text: t.dataset.tip });
+          setTip({ ...cursor.current, branches: Number(t.dataset.b ?? 0), text: t.dataset.tip ?? 'click to fork at this word' });
         }, TOOLTIP_DELAY_MS);
       }}
-      onMouseLeave={hideTip}
+      onMouseLeave={(e) => {
+        hideTip();
+        delete e.currentTarget.dataset.side;
+      }}
       onContextMenu={(e) => {
-        e.preventDefault();
         const t = target(e);
         if (!t) return;
-        hideTip();
-        menuOpenedAt.current = performance.now();
-        setMenu({ x: e.clientX, y: e.clientY, nodeId: t.dataset.n!, msg: Number(t.dataset.m), offset: Number(t.dataset.o) });
+        e.preventDefault();
+        open(e, t);
       }}
       onClick={(e) => {
         const t = target(e);
-        if (!t) return;
-        hideTip();
-        // text tokens and the ‹u›/‹as› tags are the same thing: a point in the text. Both open the menu.
-        menuOpenedAt.current = performance.now();
-        setMenu({
-          x: e.clientX,
-          y: e.clientY,
-          nodeId: t.dataset.n!,
-          msg: Number(t.dataset.m),
-          offset: Number(t.dataset.o),
-        });
+        if (t) open(e, t);
       }}
     >
-      {bubbles.length === 0 && (
-        <p className="msgs-empty">
-          Nothing here yet. Write the first message below.
-        </p>
+      {bubbles.length === 0 && <p className="msgs-empty">Nothing here yet. Write the first message below.</p>}
+      {bubbles.map((b, i) => {
+        const first = b.pieces[0];
+        const last = b.pieces[b.pieces.length - 1];
+        const end = i === bubbles.length - 1;
+        const live = b.pieces.find((p) => p.generating);
+        const tree = end && endKids.length > 0;
+        return (
+          <Fragment key={`${first.nodeId}:${first.msg}`}>
+            {i === 0 && <Gap at={{ nodeId: first.nodeId, msg: first.msg, offset: 0 }} top branches={forks.get(markKey(first.nodeId, first.msg, 0, true)) ?? 0} />}
+            <BubbleView
+              bubble={b}
+              forks={forks}
+              waiting={!!live && `${live.nodeId}:${live.msg}` !== writing}
+              tail={end && !auto ? <RobotButton tabId={tab.id} voice={b.role} off={busy} /> : undefined}
+            />
+            {tree && <ForkTree kids={endKids} onPick={(id) => useLoom.getState().goToNode(tab.id, id)} />}
+            {!last.generating && (
+              <Gap at={{ nodeId: last.nodeId, msg: last.msg, offset: last.text.length }} branches={forks.get(markKey(last.nodeId, last.msg, last.text.length)) ?? 0} quiet={tree} />
+            )}
+          </Fragment>
+        );
+      })}
+      {/* where the next message would be: the robot writes it, in the voice that did not speak last (either, in an empty chat) */}
+      {!auto && (
+        <div className="ghost-row">
+          {lastRole !== 'model' && <RobotButton tabId={tab.id} voice="model" off={busy} />}
+          {lastRole !== 'user' && <RobotButton tabId={tab.id} voice="user" off={busy} />}
+        </div>
       )}
-      {bubbles.map((b, i) => (
-        <BubbleView key={`${b.pieces[0].nodeId}:${b.pieces[0].msg}`} bubble={b} forks={forks} continues={i === bubbles.length - 1 && endContinues} />
-      ))}
-      {endKids.length > 0 && <ForkTree kids={endKids} onPick={(id) => useLoom.getState().goToNode(tab.id, id)} />}
       {menu && (
-        <TokenMenu
-          {...menu}
-          forks={forkKids.get(`${menu.nodeId}:${menu.msg}:${menu.offset}`) ?? []}
+        <ForkMenu
+          x={menu.x}
+          y={menu.y}
+          forks={forkKids.get(markKey(menu.nodeId, menu.msg, menu.offset, menu.top)) ?? []}
           onClose={() => setMenu(null)}
-          rootLevel={(() => {
-            const n = useLoom.getState().nodes[menu.nodeId];
-            return !!n && menu.msg === 0 && menu.offset === 0 && !!useLoom.getState().nodes[n.parentId ?? '']?.isRoot;
-          })()}
           onFork={(kind, count) => forkAtPoint(tab.id, menu.nodeId, menu.msg, menu.offset, kind, count)}
           onPick={(id) => useLoom.getState().goToNode(tab.id, id)}
           onOpen={(where) => useLoom.getState().openNodeIn(menu.nodeId, where)}
@@ -474,30 +500,25 @@ function Messages({ tab }: { tab: Tab }) {
   );
 }
 
-const PlusIcon = () => (
-  <svg width="15" height="15" viewBox="0 0 15 15" fill="none" aria-hidden="true">
-    <path
-      d="M8 2.75C8 2.47386 7.77614 2.25 7.5 2.25C7.22386 2.25 7 2.47386 7 2.75V7H2.75C2.47386 7 2.25 7.22386 2.25 7.5C2.25 7.77614 2.47386 8 2.75 8H7V12.25C7 12.5261 7.22386 12.75 7.5 12.75C7.77614 12.75 8 12.5261 8 12.25V8H12.25C12.5261 8 12.75 7.77614 12.75 7.5C12.75 7.22386 12.5261 7 12.25 7H8V2.75Z"
-      fill="currentColor"
-      fillRule="evenodd"
-      clipRule="evenodd"
-    />
-  </svg>
-);
+const TYPE_AS: TypeAs[] = ['user', 'assistant', 'alternate'];
 
-/** The + menu beside the chat box: insert a ‹u› / ‹as› token, or let the model carry on from here. */
-function InsertMenu({ tab, x, y, onClose }: { tab: Tab; x: number; y: number; onClose: () => void }) {
+/**
+ * The ⋮ menu beside the chat box: whether the model answers by itself when you send a message,
+ * and whose voice your messages go in.
+ */
+function ChatMenu({ at, anchor, onClose }: { at: { right: number; bottom: number }; anchor: RefObject<HTMLElement>; onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
-  const place = useNearCursor(ref, x, y);
-  const canComplete = useLoom((s) => {
-    const h = s.nodes[tab.headId];
-    return !!h && !h.isRoot && h.messages.length > 0 && !h.messages.some((m) => m.generating);
-  });
-  const busy = useLoom((s) => !!s.nodes[tab.headId]?.messages.some((m) => m.generating));
+  const row = useRef<HTMLDivElement>(null);
+  const [sub, setSub] = useState(false);
+  const auto = useChatPrefs((s) => s.autoPrompt);
+  const typeAs = useChatPrefs((s) => s.typeAs);
+  const setPrefs = useChatPrefs((s) => s.set);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === 'Escape' && onClose();
     const onDown = (e: PointerEvent) => {
-      if (ref.current && !ref.current.contains(e.target as globalThis.Node)) onClose();
+      const t = e.target as globalThis.Node;
+      // (the ⋮ button closes it itself)
+      if (ref.current && !ref.current.contains(t) && !anchor.current?.contains(t)) onClose();
     };
     window.addEventListener('keydown', onKey);
     window.addEventListener('pointerdown', onDown, true);
@@ -505,46 +526,61 @@ function InsertMenu({ tab, x, y, onClose }: { tab: Tab; x: number; y: number; on
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('pointerdown', onDown, true);
     };
-  }, [onClose]);
-  const L = useLoom.getState();
-  const act = (fn: () => void) => () => {
-    fn();
-    onClose();
-  };
+  }, [onClose, anchor]);
   return (
-    <div className="node-menu" style={place.style} ref={ref} role="menu">
-      <button role="menuitem" disabled={busy} onClick={act(() => L.insertToken(tab.id, 'user'))}>
-        insert user token ‹u›
-      </button>
-      <button role="menuitem" disabled={busy} onClick={act(() => L.insertToken(tab.id, 'model'))}>
-        insert assistant token ‹as›
-      </button>
-      <button role="menuitem" disabled={!canComplete} onClick={act(() => L.completeHere(tab.id))}>
-        prompt the model to complete from here
-      </button>
+    <div className="node-menu chat-menu" style={at} ref={ref} role="menu">
+      <div className="chat-menu-row">
+        <span id="auto-prompt-label">auto-prompt model when you send a message</span>
+        <button type="button" role="switch" className="switch" aria-checked={auto} aria-labelledby="auto-prompt-label" onClick={() => setPrefs({ autoPrompt: !auto })}>
+          <span className="knob" />
+        </button>
+      </div>
+      <div className="has-sub" ref={row} onPointerEnter={(e) => e.pointerType === 'mouse' && setSub(true)} onPointerLeave={(e) => e.pointerType === 'mouse' && setSub(false)}>
+        <button type="button" role="menuitem" aria-haspopup="menu" onClick={() => setSub(true)}>
+          <span>your messages show up as the:</span>
+          <span className="chat-menu-val">
+            {typeAs} <span className="chev">›</span>
+          </span>
+        </button>
+        {sub && (
+          <Flyout anchor={row}>
+            {TYPE_AS.map((t) => (
+              <button
+                key={t}
+                type="button"
+                role="menuitemradio"
+                aria-checked={t === typeAs}
+                onClick={() => {
+                  setPrefs({ typeAs: t });
+                  setSub(false);
+                }}
+              >
+                {t}
+                {t === typeAs && <span className="tick">✓</span>}
+              </button>
+            ))}
+          </Flyout>
+        )}
+      </div>
     </div>
   );
 }
 
 function Composer({ tab }: { tab: Tab }) {
   const [text, setText] = useState('');
-  const [plusMenu, setPlusMenu] = useState<{ x: number; y: number } | null>(null);
-  // an open token at the end of the chat: what you type goes into it, in its role
-  const openRole = useLoom((s) => {
-    const h = s.nodes[tab.headId];
-    const last = h?.messages[h.messages.length - 1];
-    return last && !last.text && !last.generating ? last.role : null;
-  });
+  const [menu, setMenu] = useState<{ right: number; bottom: number } | null>(null);
+  const auto = useChatPrefs((s) => s.autoPrompt);
+  const typeAs = useChatPrefs((s) => s.typeAs);
+  const last = useLoom((s) => lastVoice(s.nodes, tab.headId));
+  // the model is writing in this chat (or waiting to): the send button stops it
+  const busy = useLoom((s) => !!s.nodes[tab.headId]?.messages.some((m) => m.generating));
   const send = useLoom((s) => s.sendMessage);
   const focusRequest = useLoom((s) => s.focusRequest);
   const ref = useRef<HTMLTextAreaElement>(null);
-  const continuing = useLoom((s) => {
-    const head = s.nodes[tab.headId];
-    if (!head || head.messages.length || !head.forkAt) return null;
-    const ps = piecesFor(s.nodes, tab.headId);
-    const last = ps[ps.length - 1];
-    return last?.role === 'user' ? last.text.trim().split(/\s+/).slice(-4).join(' ') : null;
-  });
+  const dots = useRef<HTMLButtonElement>(null);
+  // whose voice the next message goes in. The same voice as the last words: it joins that message
+  const role = voiceFor(typeAs, last);
+  const name = role === 'model' ? 'assistant' : 'user';
 
   useEffect(() => {
     if (focusRequest?.tabId === tab.id) ref.current?.focus();
@@ -558,8 +594,8 @@ function Composer({ tab }: { tab: Tab }) {
   }, [text]);
 
   const submit = () => {
-    if (!text.trim()) return;
-    send(tab.id, text);
+    if (busy || !text.trim()) return;
+    send(tab.id, text, role, auto);
     setText('');
   };
 
@@ -571,46 +607,61 @@ function Composer({ tab }: { tab: Tab }) {
         submit();
       }}
     >
-      {continuing && <p className="composer-hint">continuing your message after “…{continuing}”</p>}
-      {openRole && !continuing && <p className="composer-hint">writing as {openRole === 'model' ? 'the assistant ‹as›' : 'the user ‹u›'}</p>}
+      {last === role && !busy && <p className="composer-hint">this adds to the {name} message above</p>}
       <div className="composer-row">
-      <button
-        type="button"
-        className="composer-plus"
-        title="Insert a token or let the model continue"
-        aria-label="Insert a token or let the model continue"
-        aria-haspopup="menu"
-        onClick={(e) => {
-          const r = e.currentTarget.getBoundingClientRect();
-          setPlusMenu(plusMenu ? null : { x: r.left, y: r.top - 4 });
-        }}
-      >
-        <PlusIcon />
-      </button>
-      <div className="composer-box">
-        <textarea
-          id={`composer-${tab.id}`}
-          ref={ref}
-          rows={1}
-          value={text}
-          placeholder={openRole === 'model' ? 'write as the assistant' : 'chat here'}
-          aria-label="Message this thread"
-          onChange={(e) => setText(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              submit();
-            }
+        <div className="composer-box">
+          <textarea
+            id={`composer-${tab.id}`}
+            ref={ref}
+            rows={1}
+            value={text}
+            placeholder={`send a new ${name} message`}
+            aria-label="Message this thread"
+            onChange={(e) => setText(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                submit();
+              }
+            }}
+          />
+          {busy ? (
+            <button key="stop" type="button" className="send stop" aria-label="Stop the model" title="Stop the model" onClick={() => useLoom.getState().stopGenerating(tab.id)}>
+              <svg viewBox="0 0 16 16" width="13" height="13" aria-hidden="true">
+                <rect x="3" y="3" width="10" height="10" rx="2" fill="currentColor" />
+              </svg>
+            </button>
+          ) : (
+            <button key="send" type="submit" className="send" aria-label="Send" disabled={!text.trim()}>
+              <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
+                <path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          )}
+        </div>
+        <button
+          type="button"
+          ref={dots}
+          className="composer-dots"
+          title="Chat options"
+          aria-label="Chat options"
+          aria-haspopup="menu"
+          aria-expanded={!!menu}
+          onClick={(e) => {
+            const r = e.currentTarget.getBoundingClientRect();
+            // its right edge on the button's, moved right when a narrow chat would push its left side off the window
+            const right = Math.min(window.innerWidth - r.right, window.innerWidth - CHAT_MENU_W - 8);
+            setMenu(menu ? null : { right: Math.max(8, right), bottom: window.innerHeight - r.top + 6 });
           }}
-        />
-        <button type="submit" className="send" aria-label="Send" disabled={!text.trim()}>
-          <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden="true">
-            <path d="M8 13V3M3.5 7.5 8 3l4.5 4.5" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        >
+          <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+            <circle cx="8" cy="3" r="1.5" fill="currentColor" />
+            <circle cx="8" cy="8" r="1.5" fill="currentColor" />
+            <circle cx="8" cy="13" r="1.5" fill="currentColor" />
           </svg>
         </button>
       </div>
-      </div>
-      {plusMenu && <InsertMenu tab={tab} {...plusMenu} onClose={() => setPlusMenu(null)} />}
+      {menu && <ChatMenu at={menu} anchor={dots} onClose={() => setMenu(null)} />}
     </form>
   );
 }
@@ -840,9 +891,6 @@ function TabMenu({ tabId, x, y, onClose }: { tabId: string; x: number; y: number
       )}
       <button role="menuitem" onClick={act(() => L.closeTab(tabId))}>
         close tab
-      </button>
-      <button role="menuitem" disabled={win.tabIds.length < 2} onClick={act(() => L.closeOtherTabs(tabId))}>
-        close other tabs
       </button>
       <button role="menuitem" disabled={i === win.tabIds.length - 1} onClick={act(() => L.closeTabsToRight(tabId))}>
         close tabs to the right

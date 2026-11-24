@@ -7,4 +7,6 @@ export default defineConfig(({ mode }) => ({
   base: './',
   plugins: [react(), ...(mode === 'single' ? [viteSingleFile()] : [])],
   build: { outDir: mode === 'single' ? 'dist-single' : 'dist' },
+  // the model worker pulls in transformers.js, which splits into chunks
+  worker: { format: 'es' },
 }));

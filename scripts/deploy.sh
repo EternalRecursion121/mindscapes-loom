@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Build and publish to https://mains.in.net/mindscapes/loom/ (served statically by the mains.in.net Node app).
+# Build and publish to https://mains.in.net/mindscapes/loomz-interview/ (served statically by the mains.in.net Node app).
 set -euo pipefail
 cd "$(dirname "$0")/.."
-DEST=/var/www/arg/mains.in.net/mindscapes/loom
+DEST=/var/www/arg/mains.in.net/mindscapes/loomz-interview
 npm run build
 mkdir -p "$DEST"
 rm -rf "$DEST/assets"
 cp -r dist/. "$DEST/"
-echo "deployed -> https://mains.in.net/mindscapes/loom/"
+echo "deployed -> https://mains.in.net/mindscapes/loomz-interview/"
